@@ -6,13 +6,24 @@ bypass:
   - name: critical
     when: { path: severity, eq: critical }
 
+# First matching rule decides, so order matters. A bot that fails a deploy must be
+# caught before ignore-bots; a bot that requests a review is ignored like any other bot.
 rules:
+  - name: deploy-failures
+    when: { path: data.state, eq: deploy_failed }
+    then: wake
+    exempt: [cooldown, quietHours, budget]
   - name: ignore-bots
     when: { path: data.actor, matches: "\\[bot\\]$" }
     then: skip
+  - name: review-requests
+    when: { path: data.state, eq: review_requested }
+    then: wake
+    exempt: [cooldown, budget]
 
 default: wake
 cooldownSeconds: 1800      # a burst of changes to one item wakes the agent once
+flushOnWake: true
 
 budget:
   maxWakesPerDay: 10

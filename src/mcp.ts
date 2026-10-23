@@ -30,7 +30,7 @@ export function createServer(config: Config, store: Store): McpServer {
       description:
         "Submit one event and get a decision, with the reason. Records the event in the audit log and updates per-key state. " +
         "wake: act on it now. skip: ignore it (duplicate, a skip rule, or over budget with overBudget=skip). " +
-        "batch: not now (cooldown, quiet hours, or over budget); it is held and returned later by wakegate_flush. " +
+        "batch: not now (cooldown, quiet hours, or over budget); it is held and handed over later, either in the `batch` field of the next wake or by wakegate_flush. " +
         "The same payload for the same (source, key) is a duplicate. Call wakegate_rules to see why a verdict came out the way it did.",
       inputSchema: {
         source: z.string().min(1).describe('Where the event came from, e.g. "github".'),
@@ -76,7 +76,7 @@ export function createServer(config: Config, store: Store): McpServer {
     "wakegate_flush",
     {
       title: "Take the batched events",
-      description: "Return the events that were batched (cooldown, quiet hours, budget) and clear the batch. Each event is returned once.",
+      description: "Return the events that were batched (cooldown, quiet hours, budget) and clear the batch. Each event is returned once. Not needed after a wake: with flushOnWake (the default) the wake already carried them.",
       inputSchema: {},
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },

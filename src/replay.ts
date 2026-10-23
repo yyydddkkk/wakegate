@@ -11,6 +11,10 @@ export interface ReplayResult {
   /** Estimated cost if every event woke the agent vs. only the wakes. */
   baselineCost: number;
   gatedCost: number;
+  /** Batched events that rode along with a later wake (flushOnWake). */
+  batchDelivered: number;
+  /** Batched events still waiting when the events ran out. */
+  batchStranded: number;
 }
 
 export function readEvents(path: string): WakeEvent[] {
@@ -40,8 +44,10 @@ export function replay(events: WakeEvent[], config: Config, costPerWake = 0): Re
     const gate = new Gate(config, store);
     const counts: Record<Action, number> = { wake: 0, skip: 0, batch: 0 };
     const reasons: Record<string, number> = {};
+    let batchDelivered = 0;
     for (const e of events) {
       const d = gate.decide(e);
+      batchDelivered += d.batch?.length ?? 0;
       counts[d.action]++;
       reasons[`${d.action}:${d.reason}`] = (reasons[`${d.action}:${d.reason}`] ?? 0) + 1;
     }
@@ -51,6 +57,8 @@ export function replay(events: WakeEvent[], config: Config, costPerWake = 0): Re
       reasons,
       baselineCost: events.length * costPerWake,
       gatedCost: counts.wake * costPerWake,
+      batchDelivered,
+      batchStranded: store.pendingCount(),
     };
   } finally {
     store.close();

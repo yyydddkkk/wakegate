@@ -1,6 +1,6 @@
 import type { Config } from "./config.ts";
 import { canonicalJson, omitPaths, sha256 } from "./hash.ts";
-import type { Store } from "./store.ts";
+import { brief, type Store } from "./store.ts";
 import type { Action, Decision, WakeEvent } from "./types.ts";
 
 export interface GateOptions {
@@ -21,6 +21,8 @@ interface Verdict {
  *   3. rules         first matching rule, else the default
  *   4. cooldown      woke for this key too recently              -> batch
  *   5. quiet hours / daily budget                                -> batch or skip
+ * A matching rule can list `exempt: [cooldown, quietHours, budget]` to skip some of 4 and 5.
+ * On a wake with flushOnWake (default), batched events ride along in `batch`.
  * Every decision, including skips, is written to the audit log.
  */
 export class Gate {
@@ -44,6 +46,8 @@ export class Gate {
       const prev = this.store.getState(ev.source, ev.key);
       const changed = prev?.fingerprint !== fingerprint;
       const verdict = this.evaluate(ev, ts, changed, prev?.lastWakeTs ?? null);
+      const flush = verdict.action === "wake" && this.config.flushOnWake;
+      const carried = flush ? this.store.takePending().map(brief) : [];
 
       const id = this.store.insertDecision({
         ts,
@@ -59,7 +63,7 @@ export class Gate {
       });
       this.store.putState(ev.source, ev.key, fingerprint, ts, verdict.action === "wake");
       if (verdict.action === "batch") this.store.addPending(id);
-      return { ...verdict, source: ev.source, key: ev.key, ts, fingerprint, changed, id };
+      return { ...verdict, source: ev.source, key: ev.key, ts, fingerprint, changed, id, ...(carried.length ? { batch: carried } : {}) };
     });
   }
 
@@ -71,19 +75,20 @@ export class Gate {
     if (bypass) return { action: "wake", reason: `bypass:${bypass.name}`, rule: bypass.name };
 
     const hit = c.rules.find((r) => r.when(ev));
+    const exempt = new Set(hit?.exempt);
     const proposed: Verdict = hit
       ? { action: hit.then, reason: `rule:${hit.name}`, rule: hit.name }
       : { action: c.defaultAction, reason: "default" };
     if (proposed.action !== "wake") return proposed;
 
-    if (c.cooldownSeconds > 0 && lastWakeTs !== null && ts - lastWakeTs < c.cooldownSeconds * 1000) {
+    if (!exempt.has("cooldown") && c.cooldownSeconds > 0 && lastWakeTs !== null && ts - lastWakeTs < c.cooldownSeconds * 1000) {
       return { action: "batch", reason: "cooldown", rule: proposed.rule };
     }
     const { quietHours, maxWakesPerDay, overBudget, timezone } = c.budget;
-    if (quietHours && inQuietHours(ts, quietHours.start, quietHours.end, timezone)) {
+    if (!exempt.has("quietHours") && quietHours && inQuietHours(ts, quietHours.start, quietHours.end, timezone)) {
       return { action: "batch", reason: "quiet-hours", rule: proposed.rule };
     }
-    if (maxWakesPerDay !== undefined && this.store.countWakes(dayOf(ts, timezone)) >= maxWakesPerDay) {
+    if (!exempt.has("budget") && maxWakesPerDay !== undefined && this.store.countWakes(dayOf(ts, timezone)) >= maxWakesPerDay) {
       return { action: overBudget, reason: "daily-budget", rule: proposed.rule };
     }
     return proposed;

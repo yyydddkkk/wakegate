@@ -1,3 +1,5 @@
+import type { Brief } from "./store.ts";
+
 export type Action = "wake" | "skip" | "batch";
 
 /** The standard envelope every source adapter produces. */
@@ -28,4 +30,6 @@ export interface Decision {
   changed: boolean;
   /** Row id in the audit log. */
   id: number;
+  /** On a wake with `flushOnWake`: events batched earlier, delivered now (once). */
+  batch?: Brief[];
 }

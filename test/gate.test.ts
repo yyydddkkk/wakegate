@@ -117,3 +117,68 @@ test("replay is a dry run and reports the cost difference", () => {
   assert.ok(Math.abs(r.gatedCost - 1.4) < 1e-9);
   assert.ok(Math.abs(r.baselineCost - 48 * 1.4) < 1e-9);
 });
+
+const REVIEW = `
+rules:
+  - { name: review, when: { path: data.state, eq: review_requested }, then: wake, exempt: [cooldown, budget] }
+cooldownSeconds: 1800
+budget: { maxWakesPerDay: 1, timezone: UTC }
+`;
+
+test("an exempt rule wakes through cooldown and an exhausted budget", () => {
+  const { gate } = setup(REVIEW);
+  assert.equal(gate.decide({ source: "gh", key: "pr/1", ts: T0, data: { state: "opened" } }).action, "wake");
+  // Same key shortly after, and the daily budget (1) is already spent.
+  const d = gate.decide({ source: "gh", key: "pr/1", ts: T0 + 3 * MIN, data: { state: "review_requested" } });
+  assert.equal(d.action, "wake");
+  assert.equal(d.reason, "rule:review");
+  // A non-exempt change on the same key is still held back.
+  assert.equal(gate.decide({ source: "gh", key: "pr/1", ts: T0 + 6 * MIN, data: { state: "commented" } }).reason, "cooldown");
+});
+
+test("exempt does not cover quiet hours unless listed", () => {
+  const { gate } = setup(`
+rules:
+  - { name: review, when: { path: data.state, eq: review_requested }, then: wake, exempt: [cooldown, budget] }
+budget: { quietHours: { start: "00:00", end: "23:59" }, timezone: UTC }
+`);
+  assert.equal(gate.decide({ source: "gh", key: "a", ts: T0, data: { state: "review_requested" } }).reason, "quiet-hours");
+});
+
+test("exempt is validated", () => {
+  assert.throws(() => parseConfig("rules: [{ name: x, when: { path: a, eq: 1 }, then: skip, exempt: [budget] }]"), /only rules with then: wake/);
+  assert.throws(() => parseConfig("rules: [{ name: x, when: { path: a, eq: 1 }, then: wake, exempt: [nap] }]"), /cooldown, quietHours, budget/);
+  assert.throws(() => parseConfig("bypass: [{ name: x, when: { path: a, eq: 1 }, exempt: [budget] }]"), /already ignore every limit/);
+});
+
+test("flushOnWake hands the earlier batch over once, on the next wake", () => {
+  const { gate, store } = setup("cooldownSeconds: 600");
+  gate.decide({ source: "s", key: "k", ts: T0, data: 1 }); // wake
+  assert.equal(gate.decide({ source: "s", key: "k", ts: T0 + MIN, data: 2 }).action, "batch");
+  const next = gate.decide({ source: "s", key: "other", ts: T0 + 2 * MIN, data: 1 });
+  assert.equal(next.action, "wake");
+  assert.deepEqual(next.batch?.map((b) => b.key), ["k"]);
+  assert.equal(store.pendingCount(), 0);
+  assert.equal(gate.decide({ source: "s", key: "third", ts: T0 + 3 * MIN, data: 1 }).batch, undefined);
+});
+
+test("flushOnWake: false leaves the batch for an explicit flush", () => {
+  const { gate, store } = setup("flushOnWake: false\ncooldownSeconds: 600");
+  gate.decide({ source: "s", key: "k", ts: T0, data: 1 });
+  gate.decide({ source: "s", key: "k", ts: T0 + MIN, data: 2 });
+  const next = gate.decide({ source: "s", key: "other", ts: T0 + 2 * MIN, data: 1 });
+  assert.equal(next.batch, undefined);
+  assert.equal(store.pendingCount(), 1);
+});
+
+test("replay reports batched events delivered with a later wake and those stranded", () => {
+  const events = [
+    { source: "s", key: "k", ts: T0, data: 1 },
+    { source: "s", key: "k", ts: T0 + MIN, data: 2 }, // batched by cooldown
+    { source: "s", key: "x", ts: T0 + 2 * MIN, data: 1 }, // wake, delivers it
+    { source: "s", key: "x", ts: T0 + 3 * MIN, data: 2 }, // batched, never followed by a wake
+  ];
+  const r = replay(events, parseConfig("cooldownSeconds: 600"));
+  assert.equal(r.batchDelivered, 1);
+  assert.equal(r.batchStranded, 1);
+});

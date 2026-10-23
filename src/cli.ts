@@ -46,20 +46,33 @@ bypass:
   - name: critical
     when: { path: severity, eq: critical }
 
+# First matching rule decides, so ORDER MATTERS. A skip rule hides everything it
+# matches, including events you would want: put exceptions above it.
 rules:
+  # Above ignore-bots on purpose: a deploy bot failing is not noise.
+  - name: deploy-failures
+    when: { path: data.state, eq: deploy_failed }
+    then: wake
+    exempt: [cooldown, quietHours, budget]
   - name: ignore-bots
     when: { path: data.actor, matches: "\\\\[bot\\\\]$" }
     then: skip
+  # Important changes should not wait behind a cooldown or an exhausted budget.
+  - name: review-requests
+    when: { path: data.state, eq: review_requested }
+    then: wake
+    exempt: [cooldown, budget]
   - name: heartbeat-is-noise
     when: { path: source, eq: heartbeat }
     then: skip
 
 default: wake
 cooldownSeconds: 300        # after waking for a key, batch further changes for 5 min
+flushOnWake: true           # a wake also hands over everything batched earlier (default)
 
 budget:
   maxWakesPerDay: 20
-  overBudget: batch          # or "skip"
+  overBudget: batch          # or "skip"; "skip" drops events for good
   quietHours: { start: "22:00", end: "07:00" }
   # timezone: Asia/Shanghai
 `;
@@ -107,7 +120,7 @@ async function main(): Promise<void> {
     if (cost > 0) {
       const saved = r.baselineCost - r.gatedCost;
       console.log(`cost: ${r.baselineCost.toFixed(2)} -> ${r.gatedCost.toFixed(2)}  (saved ${saved.toFixed(2)}, ${((saved / r.baselineCost) * 100).toFixed(1)}%)`);
-      if (r.counts.batch) console.log(`note: ${r.counts.batch} batched events are not counted; each flush that wakes the agent adds one wake.`);
+      if (r.counts.batch) console.log(`batched: ${r.batchDelivered} delivered with a later wake (no extra cost), ${r.batchStranded} still waiting at the end of the log.`);
     }
     return;
   }

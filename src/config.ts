@@ -3,8 +3,14 @@ import { parse } from "yaml";
 import { compileCondition, type Predicate } from "./condition.ts";
 import type { Action } from "./types.ts";
 
+/** Limits a rule can opt out of. A bypass rule opts out of all of them. */
+export type Exempt = "cooldown" | "quietHours" | "budget";
+const EXEMPTIONS: readonly Exempt[] = ["cooldown", "quietHours", "budget"];
+
 export interface Rule {
   name: string;
+  /** Limits this rule's wakes ignore (only for rules with then: wake). */
+  exempt: readonly Exempt[];
   when: Predicate;
   /** The condition as written in the config, kept so it can be shown back. */
   condition: unknown;
@@ -24,6 +30,8 @@ export interface Config {
   defaultAction: Action;
   /** After waking for a key, further changes within this window are batched. */
   cooldownSeconds: number;
+  /** On every wake, also hand over the events batched earlier, so a batch is never stranded. Default true. */
+  flushOnWake: boolean;
   budget: {
     maxWakesPerDay?: number;
     /** What to do with a wake that exceeds the budget. Default "batch". */
@@ -50,12 +58,17 @@ function compileRules(raw: unknown, where: string, forced?: Action): Rule[] {
     if (r === null || typeof r !== "object") throw new Error(`${at}: expected an object`);
     const o = r as Record<string, unknown>;
     if (typeof o.name !== "string" || !o.name) throw new Error(`${at}: "name" is required (it appears in the audit log)`);
-    return {
-      name: o.name,
-      when: compileCondition(o.when, `${at}.when`),
-      condition: o.when,
-      then: forced ?? asAction(o.then, `${at}.then`),
-    };
+    const then = forced ?? asAction(o.then, `${at}.then`);
+    let exempt: Exempt[] = [];
+    if (o.exempt !== undefined) {
+      if (forced) throw new Error(`${at}: bypass rules already ignore every limit; "exempt" is for rules`);
+      if (then !== "wake") throw new Error(`${at}.exempt: only rules with then: wake can be exempt`);
+      if (!Array.isArray(o.exempt) || o.exempt.some((x) => !(EXEMPTIONS as readonly unknown[]).includes(x))) {
+        throw new Error(`${at}.exempt: expected a list of ${EXEMPTIONS.join(", ")}`);
+      }
+      exempt = o.exempt as Exempt[];
+    }
+    return { name: o.name, when: compileCondition(o.when, `${at}.when`), condition: o.when, exempt, then };
   });
 }
 
@@ -103,6 +116,7 @@ export function parseConfig(text: string): Config {
     rules: compileRules(raw.rules, "rules"),
     defaultAction: raw.default === undefined ? "wake" : asAction(raw.default, "default"),
     cooldownSeconds: cooldown,
+    flushOnWake: raw.flushOnWake === undefined ? true : Boolean(raw.flushOnWake),
     budget,
   };
 }
@@ -113,7 +127,7 @@ export function loadConfig(path: string): Config {
 
 /** The active policy as plain data, for showing to a person or an agent. */
 export function describeConfig(c: Config) {
-  const rule = (r: Rule) => ({ name: r.name, when: r.condition, then: r.then });
+  const rule = (r: Rule) => ({ name: r.name, when: r.condition, then: r.then, ...(r.exempt.length ? { exempt: r.exempt } : {}) });
   return {
     dedupe: c.dedupe,
     ignorePaths: c.ignorePaths,
@@ -121,6 +135,7 @@ export function describeConfig(c: Config) {
     rules: c.rules.map(rule),
     default: c.defaultAction,
     cooldownSeconds: c.cooldownSeconds,
+    flushOnWake: c.flushOnWake,
     budget: c.budget,
   };
 }

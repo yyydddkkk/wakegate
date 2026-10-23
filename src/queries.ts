@@ -1,6 +1,6 @@
 import { describeConfig, type Config } from "./config.ts";
 import { dayOf, inQuietHours } from "./gate.ts";
-import type { DecisionRow, Store } from "./store.ts";
+import type { Store } from "./store.ts";
 import type { Action } from "./types.ts";
 
 /** "24h", "30m", "7d", "90s" or an ISO date -> epoch ms. */
@@ -45,9 +45,7 @@ export function catchup(store: Store, sinceMs: number, opts: { includeFiltered?:
   };
 }
 
-export function brief(r: DecisionRow) {
-  return { id: r.id, ts: new Date(r.ts).toISOString(), source: r.source, key: r.key, action: r.action, reason: r.reason, event: r.event };
-}
+export { brief } from "./store.ts";
 
 /** The active policy plus where today stands against it. */
 export function rules(config: Config, store: Store, now = Date.now()) {

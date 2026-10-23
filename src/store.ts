@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS http_validators (
 
 export class Store {
   private db: DatabaseSync;
+  private depth = 0;
 
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
@@ -65,7 +66,9 @@ export class Store {
 
   /** Runs `fn` atomically, so concurrent CLI invocations cannot interleave a decision. */
   transaction<T>(fn: () => T): T {
+    if (this.depth > 0) return fn(); // already inside one: join it
     this.db.exec("BEGIN IMMEDIATE");
+    this.depth++;
     try {
       const out = fn();
       this.db.exec("COMMIT");
@@ -73,6 +76,8 @@ export class Store {
     } catch (err) {
       this.db.exec("ROLLBACK");
       throw err;
+    } finally {
+      this.depth--;
     }
   }
 
@@ -159,4 +164,19 @@ type RawRow = Omit<DecisionRow, "event"> & { event_json: string };
 function toRow(r: RawRow): DecisionRow {
   const { event_json, ...rest } = r;
   return { ...rest, event: JSON.parse(event_json) as WakeEvent };
+}
+
+/** The compact form of a logged decision, used for batches and the audit log. */
+export interface Brief {
+  id: number;
+  ts: string;
+  source: string;
+  key: string;
+  action: Action;
+  reason: string;
+  event: WakeEvent;
+}
+
+export function brief(r: DecisionRow): Brief {
+  return { id: r.id, ts: new Date(r.ts).toISOString(), source: r.source, key: r.key, action: r.action, reason: r.reason, event: r.event };
 }

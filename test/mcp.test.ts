@@ -46,7 +46,7 @@ test("invalid input is rejected by the schema, not the gate", async () => {
 });
 
 test("catchup, flush and log reflect what check recorded", async () => {
-  const { call } = await connect("rules: [{ name: later, when: { path: source, eq: mail }, then: batch }]");
+  const { call } = await connect("flushOnWake: false\nrules: [{ name: later, when: { path: source, eq: mail }, then: batch }]");
   await call("wakegate_check", { source: "mail", key: "t/1", data: 1 });
   await call("wakegate_check", { source: "gh", key: "pr/2", data: 1 });
 
@@ -109,4 +109,13 @@ test("check description tells the agent what batch means and where to go next", 
   const check = (await client.listTools()).tools.find((t) => t.name === "wakegate_check")!;
   assert.match(check.description!, /wakegate_flush/);
   assert.match(check.description!, /wakegate_rules/);
+});
+
+test("a wake over MCP carries the earlier batch, so flush is not needed", async () => {
+  const { call } = await connect("rules: [{ name: later, when: { path: source, eq: mail }, then: batch }]");
+  await call("wakegate_check", { source: "mail", key: "t/1", data: 1 });
+  const wake = await call("wakegate_check", { source: "gh", key: "pr/1", data: 1 });
+  assert.equal(wake.json.action, "wake");
+  assert.deepEqual(wake.json.batch.map((b: { key: string }) => b.key), ["t/1"]);
+  assert.equal((await call("wakegate_flush")).json.length, 0);
 });
