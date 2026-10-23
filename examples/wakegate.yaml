@@ -1,0 +1,21 @@
+version: 1
+
+ignorePaths: [checkedAt]
+
+bypass:
+  - name: critical
+    when: { path: severity, eq: critical }
+
+rules:
+  - name: ignore-bots
+    when: { path: data.actor, matches: "\\[bot\\]$" }
+    then: skip
+
+default: wake
+cooldownSeconds: 1800      # a burst of changes to one item wakes the agent once
+
+budget:
+  maxWakesPerDay: 10
+  overBudget: batch
+  quietHours: { start: "22:00", end: "07:00" }
+  timezone: UTC
