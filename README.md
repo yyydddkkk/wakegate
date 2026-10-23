@@ -33,7 +33,7 @@ In a heartbeat script:
 if wakegate check --event "$EVENT_JSON" >/dev/null; then run_agent; fi
 ```
 
-Other commands: `poll <url>` (one conditional GET, then check), `flush` (print and clear batched events), `catchup --since 24h`, `log`, `replay <events.jsonl>`.
+Other commands: `poll <url>` (one conditional GET, then check), `flush` (print and clear batched events), `catchup --since 24h`, `log`, `replay <events.jsonl>`, `mcp` (see below).
 
 ## Event envelope
 
@@ -67,6 +67,27 @@ cost: 481.60 -> 7.00  (saved 474.60, 98.5%)
 ```
 
 **Read this number carefully.** The input is generated: a week of 30-minute heartbeats (336 of the 344 events are noise by construction) plus 8 hand-written real events. The 98.5% describes that scenario, not any real workload. The `1.40` per wake is a placeholder taken from a self-reported figure in a public issue; replace it with yours. Batched events are not counted, and each flush that wakes the agent adds one wake.
+
+## MCP server
+
+```bash
+wakegate mcp --config wakegate.yaml --db .wakegate/state.db
+```
+
+```json
+{ "mcpServers": { "wakegate": { "command": "npx", "args": ["wakegate", "mcp", "--config", "/path/to/wakegate.yaml", "--db", "/path/to/state.db"] } } }
+```
+
+| Tool | What it does | Read-only |
+|---|---|---|
+| `wakegate_check` | Submit an event, get `wake` / `skip` / `batch` and the reason | no (records the event) |
+| `wakegate_catchup` | What changed since `24h` / an ISO date, plus how many events are batched | yes |
+| `wakegate_flush` | Take the batched events once and clear them | no |
+| `wakegate_log` | Recent decisions with reasons | yes |
+
+**What MCP can and cannot do here.** MCP is pull-based: the server cannot wake an agent that is not running. It is useful to an agent that is already awake (call `wakegate_catchup` / `wakegate_flush` to learn what happened while it was away) and to tools or other agents that want a verdict on an event. The thing that actually decides whether to start the agent is still the `check` exit code in your scheduler or heartbeat script. Both use the same database, so they agree.
+
+The rules are fixed when the server starts; a client cannot change them. Over stdio the server trusts whoever launched it; there is no authentication layer.
 
 ## Library
 

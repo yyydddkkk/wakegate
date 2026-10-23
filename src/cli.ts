@@ -4,8 +4,10 @@ import { parseArgs } from "node:util";
 import { loadConfig, type Config } from "./config.ts";
 import { Gate } from "./gate.ts";
 import { pollUrl } from "./poll.ts";
+import { serveStdio } from "./mcp.ts";
+import { brief, catchup, parseSince } from "./queries.ts";
 import { readEvents, replay } from "./replay.ts";
-import { Store, type DecisionRow } from "./store.ts";
+import { Store } from "./store.ts";
 import type { Action, WakeEvent } from "./types.ts";
 
 /** Exit codes: scripts can branch with `if wakegate check ...; then wake_agent; fi`. */
@@ -20,6 +22,7 @@ const HELP = `wakegate - decide whether an event should wake your agent
   wakegate catchup [--since 24h]   what changed since then (per key)
   wakegate log    [--limit 50]     audit log: every decision with its reason
   wakegate replay <events.jsonl>   dry run against a fresh state; nothing is written
+  wakegate mcp                     serve the gate as MCP tools over stdio
   wakegate init                    write a starter wakegate.yaml
 
 options: --config wakegate.yaml  --db .wakegate/state.db  --source NAME
@@ -29,14 +32,6 @@ options: --config wakegate.yaml  --db .wakegate/state.db  --source NAME
 function fail(msg: string): never {
   console.error(`wakegate: ${msg}`);
   process.exit(1);
-}
-
-function parseSince(v: string): number {
-  const m = /^(\d+)([smhd])$/.exec(v);
-  if (m) return Date.now() - Number(m[1]) * { s: 1e3, m: 6e4, h: 36e5, d: 864e5 }[m[2] as "s" | "m" | "h" | "d"];
-  const t = Date.parse(v);
-  if (Number.isNaN(t)) fail(`--since: expected a duration like 24h or an ISO date, got "${v}"`);
-  return t;
 }
 
 const STARTER = `version: 1
@@ -150,25 +145,11 @@ async function main(): Promise<void> {
         return;
       }
       case "catchup": {
-        const since = parseSince(values.since);
-        const byKey = new Map<string, { source: string; key: string; changes: number; lastChange: number; lastAction: Action }>();
-        for (const r of store.decisionsSince(since)) {
-          if (!r.changed) continue;
-          const id = `${r.source}\u0000${r.key}`;
-          const cur = byKey.get(id);
-          byKey.set(id, { source: r.source, key: r.key, changes: (cur?.changes ?? 0) + 1, lastChange: r.ts, lastAction: r.action });
-        }
-        console.log(
-          JSON.stringify(
-            {
-              since: new Date(since).toISOString(),
-              pendingBatch: store.pendingCount(),
-              changed: [...byKey.values()].map((v) => ({ ...v, lastChange: new Date(v.lastChange).toISOString() })),
-            },
-            null,
-            2,
-          ),
-        );
+        console.log(JSON.stringify(catchup(store, parseSince(values.since)), null, 2));
+        return;
+      }
+      case "mcp": {
+        await serveStdio(loadCfg(), store);
         return;
       }
       case "log": {
@@ -183,10 +164,6 @@ async function main(): Promise<void> {
   } finally {
     store.close();
   }
-}
-
-function brief(r: DecisionRow) {
-  return { id: r.id, ts: new Date(r.ts).toISOString(), source: r.source, key: r.key, reason: r.reason, event: r.event };
 }
 
 main().catch((err: unknown) => fail(err instanceof Error ? err.message : String(err)));

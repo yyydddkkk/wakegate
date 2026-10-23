@@ -4,11 +4,19 @@
   "description": "A framework-agnostic gate that decides whether an event should wake your AI agent.",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=22.18" },
-  "bin": { "wakegate": "dist/cli.js" },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "wakegate": "dist/cli.js"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist", "examples", "README.md"],
+  "files": [
+    "dist",
+    "examples",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
@@ -16,7 +24,9 @@
     "wakegate": "node src/cli.ts"
   },
   "dependencies": {
-    "yaml": "^2.8.0"
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "yaml": "^2.8.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
