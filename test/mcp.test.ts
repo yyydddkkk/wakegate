@@ -20,13 +20,14 @@ async function connect(yaml = "version: 1") {
   return { client, call, store };
 }
 
-test("exposes the four tools, read-only ones annotated", async () => {
+test("exposes the five tools, read-only ones annotated", async () => {
   const { client } = await connect();
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map((t) => t.name).sort(), ["wakegate_catchup", "wakegate_check", "wakegate_flush", "wakegate_log"]);
+  assert.deepEqual(tools.map((t) => t.name).sort(), ["wakegate_catchup", "wakegate_check", "wakegate_flush", "wakegate_log", "wakegate_rules"]);
   const ro = Object.fromEntries(tools.map((t) => [t.name, t.annotations?.readOnlyHint]));
   assert.equal(ro.wakegate_catchup, true);
   assert.equal(ro.wakegate_log, true);
+  assert.equal(ro.wakegate_rules, true);
   assert.equal(ro.wakegate_check, false);
 });
 
@@ -67,4 +68,45 @@ test("a bad since value is a tool error, not a crash", async () => {
   const res = await call("wakegate_catchup", { since: "yesterday-ish" });
   assert.equal(res.isError, true);
   assert.match(res.text, /duration/);
+});
+
+test("catchup hides changes dropped by skip rules, counts them, and can include them", async () => {
+  const { call } = await connect(`
+rules:
+  - { name: ignore-bots, when: { path: data.actor, matches: "\\\\[bot\\\\]$" }, then: skip }
+`);
+  await call("wakegate_check", { source: "gh", key: "pr/1", data: { actor: "alice" } });
+  await call("wakegate_check", { source: "gh", key: "pr/2", data: { actor: "ci[bot]" } });
+
+  const quiet = await call("wakegate_catchup", { since: "1h" });
+  assert.deepEqual(quiet.json.changed.map((c: { key: string }) => c.key), ["pr/1"]);
+  assert.equal(quiet.json.filteredBySkipRules, 1);
+
+  const all = await call("wakegate_catchup", { since: "1h", includeFiltered: true });
+  assert.deepEqual(all.json.changed.map((c: { key: string }) => c.key).sort(), ["pr/1", "pr/2"]);
+  assert.equal(all.json.filteredBySkipRules, 0);
+});
+
+test("rules shows the active policy and today's standing", async () => {
+  const { call } = await connect(`
+bypass: [{ name: critical, when: { path: severity, eq: critical } }]
+rules: [{ name: noise, when: { path: source, eq: hb }, then: skip }]
+budget: { maxWakesPerDay: 3, timezone: UTC }
+`);
+  await call("wakegate_check", { source: "gh", key: "a", data: 1 });
+  const r = (await call("wakegate_rules")).json;
+  assert.equal(r.bypass[0].name, "critical");
+  assert.deepEqual(r.bypass[0].when, { path: "severity", eq: "critical" });
+  assert.equal(r.rules[0].then, "skip");
+  assert.equal(r.budget.maxWakesPerDay, 3);
+  assert.equal(r.now.wakesToday, 1);
+  assert.equal(r.now.wakesRemainingToday, 2);
+  assert.equal(typeof r.now.inQuietHours, "boolean");
+});
+
+test("check description tells the agent what batch means and where to go next", async () => {
+  const { client } = await connect();
+  const check = (await client.listTools()).tools.find((t) => t.name === "wakegate_check")!;
+  assert.match(check.description!, /wakegate_flush/);
+  assert.match(check.description!, /wakegate_rules/);
 });

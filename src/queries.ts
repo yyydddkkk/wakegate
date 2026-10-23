@@ -1,3 +1,5 @@
+import { describeConfig, type Config } from "./config.ts";
+import { dayOf, inQuietHours } from "./gate.ts";
 import type { DecisionRow, Store } from "./store.ts";
 import type { Action } from "./types.ts";
 
@@ -14,15 +16,23 @@ export interface Catchup {
   since: string;
   /** Events waiting in the batch. Call flush to take them. */
   pendingBatch: number;
+  /** Changes dropped by a `skip` rule. Hidden from `changed` unless includeFiltered is set. */
+  filteredBySkipRules: number;
   /** Keys whose content changed since `since`, with the latest outcome. */
   changed: Array<{ source: string; key: string; changes: number; lastChange: string; lastAction: Action }>;
 }
 
 /** What changed while the agent was away. A by-product of the per-key state. */
-export function catchup(store: Store, sinceMs: number): Catchup {
+export function catchup(store: Store, sinceMs: number, opts: { includeFiltered?: boolean } = {}): Catchup {
   const byKey = new Map<string, { source: string; key: string; changes: number; lastChange: number; lastAction: Action }>();
+  let filtered = 0;
   for (const r of store.decisionsSince(sinceMs)) {
     if (!r.changed) continue;
+    // A skip rule is the user saying "I don't care about this"; don't hand it back as news.
+    if (!opts.includeFiltered && r.action === "skip" && r.reason.startsWith("rule:")) {
+      filtered++;
+      continue;
+    }
     const id = `${r.source}\u0000${r.key}`;
     const cur = byKey.get(id);
     byKey.set(id, { source: r.source, key: r.key, changes: (cur?.changes ?? 0) + 1, lastChange: r.ts, lastAction: r.action });
@@ -30,10 +40,27 @@ export function catchup(store: Store, sinceMs: number): Catchup {
   return {
     since: new Date(sinceMs).toISOString(),
     pendingBatch: store.pendingCount(),
+    filteredBySkipRules: filtered,
     changed: [...byKey.values()].map((v) => ({ ...v, lastChange: new Date(v.lastChange).toISOString() })),
   };
 }
 
 export function brief(r: DecisionRow) {
   return { id: r.id, ts: new Date(r.ts).toISOString(), source: r.source, key: r.key, action: r.action, reason: r.reason, event: r.event };
+}
+
+/** The active policy plus where today stands against it. */
+export function rules(config: Config, store: Store, now = Date.now()) {
+  const { quietHours, maxWakesPerDay, timezone } = config.budget;
+  const wakesToday = store.countWakes(dayOf(now, timezone));
+  return {
+    ...describeConfig(config),
+    now: {
+      time: new Date(now).toISOString(),
+      inQuietHours: quietHours ? inQuietHours(now, quietHours.start, quietHours.end, timezone) : false,
+      wakesToday,
+      wakesRemainingToday: maxWakesPerDay === undefined ? null : Math.max(0, maxWakesPerDay - wakesToday),
+      pendingBatch: store.pendingCount(),
+    },
+  };
 }

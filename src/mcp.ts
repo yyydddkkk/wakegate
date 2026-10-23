@@ -4,7 +4,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
 import type { Config } from "./config.ts";
 import { Gate } from "./gate.ts";
-import { brief, catchup, parseSince } from "./queries.ts";
+import { brief, catchup, parseSince, rules } from "./queries.ts";
 import type { Store } from "./store.ts";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
@@ -28,8 +28,10 @@ export function createServer(config: Config, store: Store): McpServer {
     {
       title: "Check an event",
       description:
-        "Submit one event and get a decision: wake, skip or batch, with the reason. Records the event in the audit log and updates per-key state. " +
-        "The same payload for the same (source, key) is reported as a duplicate.",
+        "Submit one event and get a decision, with the reason. Records the event in the audit log and updates per-key state. " +
+        "wake: act on it now. skip: ignore it (duplicate, a skip rule, or over budget with overBudget=skip). " +
+        "batch: not now (cooldown, quiet hours, or over budget); it is held and returned later by wakegate_flush. " +
+        "The same payload for the same (source, key) is a duplicate. Call wakegate_rules to see why a verdict came out the way it did.",
       inputSchema: {
         source: z.string().min(1).describe('Where the event came from, e.g. "github".'),
         key: z.string().min(1).describe('Stable identity of the thing that changed, e.g. "pr/412".'),
@@ -52,15 +54,18 @@ export function createServer(config: Config, store: Store): McpServer {
     "wakegate_catchup",
     {
       title: "What changed while I was away",
-      description: "Per-key summary of content changes since a point in time, plus how many events wait in the batch. Read-only.",
+      description:
+        "Per-key summary of content changes since a point in time, plus how many events wait in the batch. " +
+        "Changes the user's skip rules filter out (bots, noise) are left out and only counted in filteredBySkipRules. Read-only.",
       inputSchema: {
         since: z.string().default("24h").describe('A duration like "30m", "24h", "7d", or an ISO date.'),
+        includeFiltered: z.boolean().default(false).describe("Also list changes dropped by skip rules."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    ({ since }) => {
+    ({ since, includeFiltered }) => {
       try {
-        return json(catchup(store, parseSince(since)));
+        return json(catchup(store, parseSince(since), { includeFiltered }));
       } catch (err) {
         return failure(err instanceof Error ? err.message : String(err));
       }
@@ -76,6 +81,19 @@ export function createServer(config: Config, store: Store): McpServer {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     () => json(store.takePending().map(brief)),
+  );
+
+  server.registerTool(
+    "wakegate_rules",
+    {
+      title: "Active rules and budget",
+      description:
+        "The policy in force (bypass rules, skip/batch/wake rules, cooldown, budget, quiet hours) and where today stands: " +
+        "whether it is quiet hours now, wakes used and remaining today, events in the batch. Use it to explain a verdict. Read-only; rules cannot be changed from here.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    () => json(rules(config, store)),
   );
 
   server.registerTool(

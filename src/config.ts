@@ -6,6 +6,8 @@ import type { Action } from "./types.ts";
 export interface Rule {
   name: string;
   when: Predicate;
+  /** The condition as written in the config, kept so it can be shown back. */
+  condition: unknown;
   then: Action;
 }
 
@@ -51,6 +53,7 @@ function compileRules(raw: unknown, where: string, forced?: Action): Rule[] {
     return {
       name: o.name,
       when: compileCondition(o.when, `${at}.when`),
+      condition: o.when,
       then: forced ?? asAction(o.then, `${at}.then`),
     };
   });
@@ -106,4 +109,18 @@ export function parseConfig(text: string): Config {
 
 export function loadConfig(path: string): Config {
   return parseConfig(readFileSync(path, "utf8"));
+}
+
+/** The active policy as plain data, for showing to a person or an agent. */
+export function describeConfig(c: Config) {
+  const rule = (r: Rule) => ({ name: r.name, when: r.condition, then: r.then });
+  return {
+    dedupe: c.dedupe,
+    ignorePaths: c.ignorePaths,
+    bypass: c.bypass.map(rule),
+    rules: c.rules.map(rule),
+    default: c.defaultAction,
+    cooldownSeconds: c.cooldownSeconds,
+    budget: c.budget,
+  };
 }

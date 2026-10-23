@@ -5,7 +5,7 @@ import { loadConfig, type Config } from "./config.ts";
 import { Gate } from "./gate.ts";
 import { pollUrl } from "./poll.ts";
 import { serveStdio } from "./mcp.ts";
-import { brief, catchup, parseSince } from "./queries.ts";
+import { brief, catchup, parseSince, rules } from "./queries.ts";
 import { readEvents, replay } from "./replay.ts";
 import { Store } from "./store.ts";
 import type { Action, WakeEvent } from "./types.ts";
@@ -19,7 +19,9 @@ const HELP = `wakegate - decide whether an event should wake your agent
                                    exit: 0 wake | 10 skip | 11 batch | 1 error
   wakegate poll   <url>            one conditional GET, then check the result
   wakegate flush                   print and clear the batched events as JSON
-  wakegate catchup [--since 24h]   what changed since then (per key)
+  wakegate catchup [--since 24h]   what changed since then (per key); --include-filtered adds
+                                   changes your skip rules dropped
+  wakegate rules                   the active policy and where today stands against it
   wakegate log    [--limit 50]     audit log: every decision with its reason
   wakegate replay <events.jsonl>   dry run against a fresh state; nothing is written
   wakegate mcp                     serve the gate as MCP tools over stdio
@@ -73,6 +75,7 @@ async function main(): Promise<void> {
       since: { type: "string", default: "24h" },
       limit: { type: "string", default: "50" },
       "cost-per-wake": { type: "string", default: "0" },
+      "include-filtered": { type: "boolean", default: false },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -145,7 +148,11 @@ async function main(): Promise<void> {
         return;
       }
       case "catchup": {
-        console.log(JSON.stringify(catchup(store, parseSince(values.since)), null, 2));
+        console.log(JSON.stringify(catchup(store, parseSince(values.since), { includeFiltered: values["include-filtered"] }), null, 2));
+        return;
+      }
+      case "rules": {
+        console.log(JSON.stringify(rules(loadCfg(), store), null, 2));
         return;
       }
       case "mcp": {

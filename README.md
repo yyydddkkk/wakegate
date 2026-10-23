@@ -33,7 +33,7 @@ In a heartbeat script:
 if wakegate check --event "$EVENT_JSON" >/dev/null; then run_agent; fi
 ```
 
-Other commands: `poll <url>` (one conditional GET, then check), `flush` (print and clear batched events), `catchup --since 24h`, `log`, `replay <events.jsonl>`, `mcp` (see below).
+Other commands: `rules` (active policy and today's standing), `poll <url>` (one conditional GET, then check), `flush` (print and clear batched events), `catchup --since 24h [--include-filtered]`, `log`, `replay <events.jsonl>`, `mcp` (see below).
 
 ## Event envelope
 
@@ -81,7 +81,8 @@ wakegate mcp --config wakegate.yaml --db .wakegate/state.db
 | Tool | What it does | Read-only |
 |---|---|---|
 | `wakegate_check` | Submit an event, get `wake` / `skip` / `batch` and the reason | no (records the event) |
-| `wakegate_catchup` | What changed since `24h` / an ISO date, plus how many events are batched | yes |
+| `wakegate_catchup` | What changed since `24h` / an ISO date, plus how many events are batched. Changes your `skip` rules dropped are left out and only counted (`includeFiltered` shows them) | yes |
+| `wakegate_rules` | The active rules, cooldown and budget, plus today's standing: quiet hours now, wakes used and left, batch size. Lets an agent explain a verdict | yes |
 | `wakegate_flush` | Take the batched events once and clear them | no |
 | `wakegate_log` | Recent decisions with reasons | yes |
 
