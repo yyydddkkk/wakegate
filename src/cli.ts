@@ -5,7 +5,7 @@ import { loadConfig, type Config } from "./config.ts";
 import { Gate } from "./gate.ts";
 import { pollUrl } from "./poll.ts";
 import { serveStdio } from "./mcp.ts";
-import { brief, catchup, parseSince, rules } from "./queries.ts";
+import { brief, catchup, parseSince, report, review, rules } from "./queries.ts";
 import { readEvents, replay } from "./replay.ts";
 import { Store } from "./store.ts";
 import type { Action, WakeEvent } from "./types.ts";
@@ -22,12 +22,17 @@ const HELP = `wakegate - decide whether an event should wake your agent
   wakegate catchup [--since 24h]   what changed since then (per key); --include-filtered adds
                                    changes your skip rules dropped
   wakegate rules                   the active policy and where today stands against it
+  wakegate report [--since 7d]     what the rules decided, label counts and an estimate of missed events
+  wakegate review [--sample N]     draw a random sample of suppressed events to label; lists what awaits a label
+  wakegate label  <id> wanted|unwanted [--note TEXT]
+                                   record whether an event was worth waking for
   wakegate log    [--limit 50]     audit log: every decision with its reason
   wakegate replay <events.jsonl>   dry run against a fresh state; nothing is written
   wakegate mcp                     serve the gate as MCP tools over stdio
   wakegate init                    write a starter wakegate.yaml
 
 options: --config wakegate.yaml  --db .wakegate/state.db  --source NAME
+         --shadow                every event wakes; the verdict is only recorded (try it risk-free)
          --cost-per-wake N       (replay) estimated cost of one agent wake
 `;
 
@@ -89,6 +94,11 @@ async function main(): Promise<void> {
       limit: { type: "string", default: "50" },
       "cost-per-wake": { type: "string", default: "0" },
       "include-filtered": { type: "boolean", default: false },
+      shadow: { type: "boolean", default: false },
+      sample: { type: "string" },
+      seed: { type: "string" },
+      note: { type: "string" },
+      json: { type: "boolean", default: false },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -107,7 +117,8 @@ async function main(): Promise<void> {
 
   const loadCfg = (): Config => {
     if (!existsSync(values.config)) fail(`${values.config} not found (run "wakegate init")`);
-    return loadConfig(values.config);
+    const cfg = loadConfig(values.config);
+    return values.shadow ? { ...cfg, mode: "shadow", canaryRate: 0 } : cfg;
   };
 
   if (cmd === "replay") {
@@ -119,6 +130,7 @@ async function main(): Promise<void> {
     for (const [reason, n] of Object.entries(r.reasons).sort((a, b) => b[1] - a[1])) console.log(`  ${String(n).padStart(6)}  ${reason}`);
     if (cost > 0) {
       const saved = r.baselineCost - r.gatedCost;
+      if (r.canariesReleased) console.log(`canaries: ${r.canariesReleased} skipped events were released as wakes to measure misses (included in the cost below).`);
       console.log(`cost: ${r.baselineCost.toFixed(2)} -> ${r.gatedCost.toFixed(2)}  (saved ${saved.toFixed(2)}, ${((saved / r.baselineCost) * 100).toFixed(1)}%)`);
       if (r.counts.batch) console.log(`batched: ${r.batchDelivered} delivered with a later wake (no extra cost), ${r.batchStranded} still waiting at the end of the log.`);
     }
@@ -164,6 +176,32 @@ async function main(): Promise<void> {
         console.log(JSON.stringify(catchup(store, parseSince(values.since), { includeFiltered: values["include-filtered"] }), null, 2));
         return;
       }
+      case "report": {
+        const r = report(store, parseSince(values.since === "24h" && !process.argv.includes("--since") ? "7d" : values.since), { costPerWake: Number(values["cost-per-wake"]) || undefined });
+        if (values.json) console.log(JSON.stringify(r, null, 2));
+        else printReport(r);
+        return;
+      }
+      case "review": {
+        const items = review(store, parseSince(values.since === "24h" && !process.argv.includes("--since") ? "7d" : values.since), {
+          sample: values.sample ? Number(values.sample) : undefined,
+          seed: values.seed ? Number(values.seed) : undefined,
+        });
+        if (values.json) console.log(JSON.stringify(items, null, 2));
+        else {
+          console.log(`${items.length} event(s) waiting for a label. For each: wakegate label <id> wanted|unwanted\n("wanted" = it should have woken the agent)\n`);
+          for (const b of items) console.log(`#${b.id}  ${b.ts}  ${b.source}/${b.key}  ${b.verdict}:${b.reason}\n      ${JSON.stringify(b.event.data).slice(0, 200)}`);
+        }
+        return;
+      }
+      case "label": {
+        const id = Number(arg);
+        const verdict = positionals[2];
+        if (!Number.isInteger(id) || (verdict !== "wanted" && verdict !== "unwanted")) fail("usage: wakegate label <id> wanted|unwanted [--note TEXT]");
+        const { sample } = store.setLabel(id, verdict, values.note ?? null, Date.now());
+        console.log(JSON.stringify({ id, label: verdict, countsTowardMissEstimate: sample }));
+        return;
+      }
       case "rules": {
         console.log(JSON.stringify(rules(loadCfg(), store), null, 2));
         return;
@@ -174,7 +212,8 @@ async function main(): Promise<void> {
       }
       case "log": {
         for (const r of store.recentDecisions(Number(values.limit))) {
-          console.log(`${new Date(r.ts).toISOString()}  ${r.action.padEnd(5)}  ${r.source}/${r.key}  ${r.reason}`);
+          const tag = r.mode === "enforce" ? "" : `  [${r.mode}: woke, rules said ${r.verdict}]`;
+          console.log(`#${r.id}  ${new Date(r.ts).toISOString()}  ${r.verdict.padEnd(5)}  ${r.source}/${r.key}  ${r.reason}${tag}`);
         }
         return;
       }
@@ -184,6 +223,24 @@ async function main(): Promise<void> {
   } finally {
     store.close();
   }
+}
+
+function printReport(r: ReturnType<typeof report>): void {
+  const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
+  console.log(`since ${r.since}: ${r.events} events`);
+  console.log(`rules decided: wake ${r.verdicts.wake}, skip ${r.verdicts.skip}, batch ${r.verdicts.batch}   (delivered in: enforce ${r.byMode.enforce}, shadow ${r.byMode.shadow}, canary ${r.byMode.canary})`);
+  for (const t of r.topReasons) console.log(`  ${String(t.n).padStart(6)}  ${t.verdict}:${t.reason}`);
+  if (r.byMode.shadow) console.log(`shadow: enforcing would have avoided ${r.wakesAvoidable} wakes${r.estimatedSaving !== null ? ` (about ${r.estimatedSaving.toFixed(2)} at the given cost)` : ""}`);
+  console.log(`suppressed by rules (excluding duplicates): ${r.suppressedByRules}`);
+  console.log(`labels: ${r.labels.total} (wanted ${r.labels.wanted}, unwanted ${r.labels.unwanted}); wakes called unwanted: ${r.unwantedWakes}`);
+  if (r.missEstimate) {
+    const m = r.missEstimate;
+    console.log(`miss estimate: ${m.wanted} of ${m.sampleSize} sampled suppressed events were wanted = ${pct(m.rate)} (95% CI ${pct(m.ci95[0])} to ${pct(m.ci95[1])}), i.e. roughly ${m.expectedMissedEvents[0]} to ${m.expectedMissedEvents[1]} missed events in this window`);
+    for (const b of r.byRule.filter((x) => x.sampleSize > 0).slice(0, 6)) {
+      console.log(`  rule ${b.rule}: ${b.wanted} of ${b.sampleSize} sampled were wanted (95% CI ${pct(b.ci95[0])} to ${pct(b.ci95[1])}); ${b.suppressed} suppressed`);
+    }
+  } else console.log("miss estimate: none yet (no labelled random sample)");
+  for (const a of r.advice) console.log(`- ${a}`);
 }
 
 main().catch((err: unknown) => fail(err instanceof Error ? err.message : String(err)));

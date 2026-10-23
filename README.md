@@ -34,7 +34,7 @@ In a heartbeat script:
 if wakegate check --event "$EVENT_JSON" >/dev/null; then run_agent; fi
 ```
 
-Other commands: `rules` (active policy and today's standing), `poll <url>` (one conditional GET, then check), `flush` (print and clear batched events), `catchup --since 24h [--include-filtered]`, `log`, `replay <events.jsonl>`, `mcp` (see below).
+Other commands: `report`, `review`, `label` (see *Measuring what the rules miss*), `rules` (active policy and today's standing), `poll <url>` (one conditional GET, then check), `flush` (print and clear batched events), `catchup --since 24h [--include-filtered]`, `log`, `replay <events.jsonl>`, `mcp` (see below).
 
 ## Event envelope
 
@@ -93,6 +93,24 @@ What this shows, and what it does not:
 - Still lossy by design: `overBudget: skip` drops events for good (the "nice-to-know" column falls to about 80%), and quiet hours still delay a late-evening review request until the next wake.
 - Do not read any of this as a real-world miss rate.
 
+## Measuring what the rules miss
+
+A gate that drops events is only trustworthy if you can see what it dropped. Two tools, both off by default:
+
+- **Shadow mode** (`mode: shadow` in the config, or `--shadow` on any command): every event is delivered as a wake, exactly as without wakegate. The verdict the rules *would* have given is recorded, and cooldown and budget are simulated from those verdicts. Try it on live traffic with nothing at risk, then read `wakegate report` to see how many wakes enforcing would have avoided.
+- **Canary** (`canary: { rate: 0.02 }`): in enforce mode, that fraction of events the rules would have skipped (duplicates excluded) is delivered as a wake anyway. The decision carries `canary: true` and a note, and the receiving agent or person records `wakegate label <id> wanted|unwanted`. Canaries do not spend the daily budget.
+
+`wakegate review --sample 30` draws a uniform random sample of suppressed events from the log for a person to label, which is the way to get a sample in shadow mode. `wakegate report` then estimates the share of suppressed events that were wanted, with a 95% Wilson interval, and breaks it down by rule so you can see which rule is hiding things. Only labels on canaries and on `review` samples enter the estimate; labels you add by hand are stored but not used for it.
+
+Illustrative output, not a measurement:
+
+```
+miss estimate: 1 of 40 sampled suppressed events were wanted = 2.5% (95% CI 0.4% to 12.9%), roughly 1 to 34 missed events in this window
+  rule ignore-bots: 1 of 6 sampled were wanted ...
+```
+
+**What this can and cannot tell you.** `examples/bench-canary.ts` checks the estimator against synthetic traffic with known labels and a perfect reviewer: the intervals contain the true rate in about 90-100% of runs, so the estimate is honest. It is also *wide*: with a true miss rate of 1-2% among suppressed events, a 2% canary gives about 8 labels in two weeks and an interval about 36 points wide; 20% gives about 59 labels and about 8 points. Rare misses need hundreds of labels to see. Treat a canary as a tripwire ("a rule just hid something wanted: look at it") rather than a precise rate, and read the per-rule view, not only the overall number. The estimate assumes the reviewer is right; a tired reviewer or an agent labelling its own wakes will be noisier.
+
 ## MCP server
 
 ```bash
@@ -109,7 +127,9 @@ wakegate mcp --config wakegate.yaml --db .wakegate/state.db
 | `wakegate_catchup` | What changed since `24h` / an ISO date, plus how many events are batched. Changes your `skip` rules dropped are left out and only counted (`includeFiltered` shows them) | yes |
 | `wakegate_rules` | The active rules, cooldown and budget, plus today's standing: quiet hours now, wakes used and left, batch size. Lets an agent explain a verdict | yes |
 | `wakegate_flush` | Take the batched events once and clear them (not needed after a wake with `flushOnWake`) | no |
-| `wakegate_log` | Recent decisions with reasons | yes |
+| `wakegate_log` | Recent decisions with ids, verdicts and reasons | yes |
+| `wakegate_label` | Record `wanted` / `unwanted` for a decision id (canaries and review samples feed the miss estimate) | no |
+| `wakegate_report` | What the rules decided, wakes shadow mode would have avoided, label counts, miss estimate with interval and per-rule breakdown | yes |
 
 **What MCP can and cannot do here.** MCP is pull-based: the server cannot wake an agent that is not running. It is useful to an agent that is already awake (call `wakegate_catchup` / `wakegate_flush` to learn what happened while it was away) and to tools or other agents that want a verdict on an event. The thing that actually decides whether to start the agent is still the `check` exit code in your scheduler or heartbeat script. Both use the same database, so they agree.
 
@@ -127,7 +147,7 @@ if (d.action === "wake") await runAgent();
 
 ## Not in v0.1
 
-Adaptive polling schedules, a learned wake model, OAuth/credential handling, per-service connectors, a hosted service. The audit log is meant to become the training data for a learned layer later; that has not been built or validated.
+Stratified sampling (per-rule quotas), a labelling UI, adaptive polling schedules, a learned wake model, OAuth/credential handling, per-service connectors, a hosted service. The audit log is meant to become the training data for a learned layer later; that has not been built or validated.
 
 ## Known limits
 

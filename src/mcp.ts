@@ -4,7 +4,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
 import type { Config } from "./config.ts";
 import { Gate } from "./gate.ts";
-import { brief, catchup, parseSince, rules } from "./queries.ts";
+import { brief, catchup, parseSince, report, rules } from "./queries.ts";
 import type { Store } from "./store.ts";
 
 const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
@@ -31,7 +31,9 @@ export function createServer(config: Config, store: Store): McpServer {
         "Submit one event and get a decision, with the reason. Records the event in the audit log and updates per-key state. " +
         "wake: act on it now. skip: ignore it (duplicate, a skip rule, or over budget with overBudget=skip). " +
         "batch: not now (cooldown, quiet hours, or over budget); it is held and handed over later, either in the `batch` field of the next wake or by wakegate_flush. " +
-        "The same payload for the same (source, key) is a duplicate. Call wakegate_rules to see why a verdict came out the way it did.",
+        "The same payload for the same (source, key) is a duplicate. Call wakegate_rules to see why a verdict came out the way it did. " +
+        "`verdict` is what the rules decided; `action` is what to do. They differ in shadow mode (always wake) and for canaries: an event the rules would have skipped, released on purpose to measure misses. " +
+        "If `canary` is true, judge whether the event was worth waking for and record it with wakegate_label.",
       inputSchema: {
         source: z.string().min(1).describe('Where the event came from, e.g. "github".'),
         key: z.string().min(1).describe('Stable identity of the thing that changed, e.g. "pr/412".'),
@@ -97,10 +99,53 @@ export function createServer(config: Config, store: Store): McpServer {
   );
 
   server.registerTool(
+    "wakegate_label",
+    {
+      title: "Record whether an event was worth waking for",
+      description:
+        "Label a decision by its id: wanted (it should have woken the agent) or unwanted (it was noise). " +
+        "Labels on canaries and on events drawn by `wakegate review` feed the miss estimate in wakegate_report; other labels are kept but not used for it.",
+      inputSchema: {
+        id: z.number().int().describe("Decision id, from wakegate_check, wakegate_log or a canary's note."),
+        label: z.enum(["wanted", "unwanted"]),
+        note: z.string().optional(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    ({ id, label, note }) => {
+      try {
+        const { sample } = store.setLabel(id, label, note ?? null, Date.now());
+        return json({ id, label, countsTowardMissEstimate: sample });
+      } catch (err) {
+        return failure(err instanceof Error ? err.message : String(err));
+      }
+    },
+  );
+
+  server.registerTool(
+    "wakegate_report",
+    {
+      title: "How well are the rules doing",
+      description:
+        "What the rules decided over a period, how many wakes shadow mode would have avoided, label counts, and an estimate of how many suppressed events were actually wanted " +
+        "(with a 95% interval, from labelled random samples only). Read-only. With few labels the estimate is weak; the advice field says so.",
+      inputSchema: { since: z.string().default("7d").describe('A duration like "24h", "7d", or an ISO date.') },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    ({ since }) => {
+      try {
+        return json(report(store, parseSince(since)));
+      } catch (err) {
+        return failure(err instanceof Error ? err.message : String(err));
+      }
+    },
+  );
+
+  server.registerTool(
     "wakegate_log",
     {
       title: "Audit log",
-      description: "The most recent decisions with their reasons, oldest first. Read-only.",
+      description: "The most recent decisions with their ids, verdicts and reasons, oldest first. Read-only.",
       inputSchema: { limit: z.number().int().min(1).max(500).default(50) },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },

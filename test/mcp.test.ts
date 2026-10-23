@@ -20,10 +20,10 @@ async function connect(yaml = "version: 1") {
   return { client, call, store };
 }
 
-test("exposes the five tools, read-only ones annotated", async () => {
+test("exposes the seven tools, read-only ones annotated", async () => {
   const { client } = await connect();
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map((t) => t.name).sort(), ["wakegate_catchup", "wakegate_check", "wakegate_flush", "wakegate_log", "wakegate_rules"]);
+  assert.deepEqual(tools.map((t) => t.name).sort(), ["wakegate_catchup", "wakegate_check", "wakegate_flush", "wakegate_label", "wakegate_log", "wakegate_report", "wakegate_rules"]);
   const ro = Object.fromEntries(tools.map((t) => [t.name, t.annotations?.readOnlyHint]));
   assert.equal(ro.wakegate_catchup, true);
   assert.equal(ro.wakegate_log, true);
@@ -118,4 +118,21 @@ test("a wake over MCP carries the earlier batch, so flush is not needed", async 
   assert.equal(wake.json.action, "wake");
   assert.deepEqual(wake.json.batch.map((b: { key: string }) => b.key), ["t/1"]);
   assert.equal((await call("wakegate_flush")).json.length, 0);
+});
+
+test("a canary arrives with a note, can be labelled over MCP, and shows up in the report", async () => {
+  const { call } = await connect("canary: { rate: 1 }\nrules: [{ name: noise, when: { path: data.kind, eq: noise }, then: skip }]");
+  const canary = await call("wakegate_check", { source: "s", key: "a", data: { kind: "noise" } });
+  assert.equal(canary.json.canary, true);
+  assert.equal(canary.json.action, "wake");
+  assert.equal(canary.json.verdict, "skip");
+
+  const label = await call("wakegate_label", { id: canary.json.id, label: "wanted", note: "it was a real alert" });
+  assert.equal(label.json.countsTowardMissEstimate, true);
+
+  const r = await call("wakegate_report", { since: "1h" });
+  assert.equal(r.json.missEstimate.wanted, 1);
+  assert.equal(r.json.missEstimate.sampleSize, 1);
+
+  assert.equal((await call("wakegate_label", { id: 9999, label: "wanted" })).isError, true);
 });

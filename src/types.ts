@@ -2,6 +2,13 @@ import type { Brief } from "./store.ts";
 
 export type Action = "wake" | "skip" | "batch";
 
+/**
+ * enforce: the verdict is delivered.
+ * shadow:  every event is delivered as a wake; the verdict is only recorded.
+ * canary:  a sampled event that would have been skipped is delivered as a wake instead.
+ */
+export type Mode = "enforce" | "shadow" | "canary";
+
 /** The standard envelope every source adapter produces. */
 export interface WakeEvent {
   /** Where the event came from, e.g. "github", "heartbeat", a hostname. */
@@ -17,9 +24,16 @@ export interface WakeEvent {
 }
 
 export interface Decision {
+  /** What the caller should do. In shadow mode and for canaries this is always "wake". */
   action: Action;
-  /** Machine-readable reason, e.g. "duplicate", "bypass:security", "daily-budget". */
+  /** What the rules decided. Equals `action` unless mode is shadow or canary. */
+  verdict: Action;
+  mode: Mode;
+  /** Machine-readable reason for the verdict, e.g. "duplicate", "bypass:security", "daily-budget". */
   reason: string;
+  /** Set on canaries: tells whoever receives the wake how to record whether it was worth it. */
+  canary?: true;
+  note?: string;
   /** Name of the rule that decided, if any. */
   rule?: string;
   source: string;

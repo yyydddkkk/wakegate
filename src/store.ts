@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { Action, WakeEvent } from "./types.ts";
+import type { Action, Mode, WakeEvent } from "./types.ts";
 
 export interface KeyState {
   fingerprint: string;
@@ -16,7 +16,11 @@ export interface DecisionRow {
   source: string;
   key: string;
   fingerprint: string;
+  /** What was delivered. */
   action: Action;
+  /** What the rules decided. */
+  verdict: Action;
+  mode: Mode;
   reason: string;
   rule: string | null;
   changed: number;
@@ -38,12 +42,18 @@ CREATE TABLE IF NOT EXISTS decisions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL, day TEXT NOT NULL,
   source TEXT NOT NULL, key TEXT NOT NULL, fingerprint TEXT NOT NULL,
-  action TEXT NOT NULL, reason TEXT NOT NULL, rule TEXT,
+  action TEXT NOT NULL, verdict TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL DEFAULT 'enforce',
+  reason TEXT NOT NULL, rule TEXT,
   changed INTEGER NOT NULL, event_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS decisions_ts ON decisions (ts);
 CREATE INDEX IF NOT EXISTS decisions_day_action ON decisions (day, action);
 CREATE TABLE IF NOT EXISTS pending (decision_id INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS labels (
+  decision_id INTEGER PRIMARY KEY, label TEXT NOT NULL, note TEXT, ts INTEGER NOT NULL,
+  sample INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS review_queue (decision_id INTEGER PRIMARY KEY, picked_ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS http_validators (
   url TEXT PRIMARY KEY, etag TEXT, last_modified TEXT
 );
@@ -58,6 +68,15 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /** Databases made before shadow/canary lack the verdict and mode columns. */
+  private migrate(): void {
+    const cols = (this.db.prepare("PRAGMA table_info(decisions)").all() as Array<{ name: string }>).map((c) => c.name);
+    if (!cols.includes("verdict")) this.db.exec("ALTER TABLE decisions ADD COLUMN verdict TEXT NOT NULL DEFAULT ''");
+    if (!cols.includes("mode")) this.db.exec("ALTER TABLE decisions ADD COLUMN mode TEXT NOT NULL DEFAULT 'enforce'");
+    this.db.exec("UPDATE decisions SET verdict = action WHERE verdict = ''");
   }
 
   close(): void {
@@ -101,15 +120,15 @@ export class Store {
   insertDecision(d: Omit<DecisionRow, "id">): number {
     const r = this.db
       .prepare(
-        `INSERT INTO decisions (ts, day, source, key, fingerprint, action, reason, rule, changed, event_json)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO decisions (ts, day, source, key, fingerprint, action, verdict, mode, reason, rule, changed, event_json)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
-      .run(d.ts, d.day, d.source, d.key, d.fingerprint, d.action, d.reason, d.rule, d.changed, JSON.stringify(d.event));
+      .run(d.ts, d.day, d.source, d.key, d.fingerprint, d.action, d.verdict, d.mode, d.reason, d.rule, d.changed, JSON.stringify(d.event));
     return Number(r.lastInsertRowid);
   }
 
   countWakes(day: string): number {
-    const r = this.db.prepare("SELECT COUNT(*) AS n FROM decisions WHERE day=? AND action='wake'").get(day) as { n: number };
+    const r = this.db.prepare("SELECT COUNT(*) AS n FROM decisions WHERE day=? AND verdict='wake'").get(day) as { n: number };
     return r.n;
   }
 
@@ -140,6 +159,48 @@ export class Store {
   recentDecisions(limit: number): DecisionRow[] {
     const rows = this.db.prepare("SELECT * FROM decisions ORDER BY id DESC LIMIT ?").all(limit) as unknown as RawRow[];
     return rows.map(toRow).reverse();
+  }
+
+  getDecision(id: number): DecisionRow | undefined {
+    const r = this.db.prepare("SELECT * FROM decisions WHERE id=?").get(id) as unknown as RawRow | undefined;
+    return r && toRow(r);
+  }
+
+  /** Records a human or agent judgement. `sample` marks labels that came from a random sample. */
+  setLabel(id: number, label: "wanted" | "unwanted", note: string | null, ts: number): { sample: boolean } {
+    const d = this.getDecision(id);
+    if (!d) throw new Error(`no decision with id ${id}`);
+    const sample = d.mode === "canary" || this.inQueue(id);
+    this.db
+      .prepare(
+        `INSERT INTO labels (decision_id, label, note, ts, sample) VALUES (?,?,?,?,?)
+         ON CONFLICT (decision_id) DO UPDATE SET label=excluded.label, note=excluded.note, ts=excluded.ts, sample=excluded.sample`,
+      )
+      .run(id, label, note, ts, sample ? 1 : 0);
+    return { sample };
+  }
+
+  labels(): Map<number, { label: "wanted" | "unwanted"; note: string | null; sample: boolean }> {
+    const rows = this.db.prepare("SELECT decision_id, label, note, sample FROM labels").all() as unknown as Array<{
+      decision_id: number;
+      label: "wanted" | "unwanted";
+      note: string | null;
+      sample: number;
+    }>;
+    return new Map(rows.map((r) => [r.decision_id, { label: r.label, note: r.note, sample: r.sample === 1 }]));
+  }
+
+  inQueue(id: number): boolean {
+    return this.db.prepare("SELECT 1 FROM review_queue WHERE decision_id=?").get(id) !== undefined;
+  }
+
+  addToQueue(ids: number[], ts: number): void {
+    const ins = this.db.prepare("INSERT OR IGNORE INTO review_queue (decision_id, picked_ts) VALUES (?,?)");
+    for (const id of ids) ins.run(id, ts);
+  }
+
+  queuedIds(): number[] {
+    return (this.db.prepare("SELECT decision_id FROM review_queue ORDER BY decision_id").all() as Array<{ decision_id: number }>).map((r) => r.decision_id);
   }
 
   getValidators(url: string): HttpValidators | undefined {
@@ -173,10 +234,12 @@ export interface Brief {
   source: string;
   key: string;
   action: Action;
+  verdict: Action;
+  mode: Mode;
   reason: string;
   event: WakeEvent;
 }
 
 export function brief(r: DecisionRow): Brief {
-  return { id: r.id, ts: new Date(r.ts).toISOString(), source: r.source, key: r.key, action: r.action, reason: r.reason, event: r.event };
+  return { id: r.id, ts: new Date(r.ts).toISOString(), source: r.source, key: r.key, action: r.action, verdict: r.verdict, mode: r.mode, reason: r.reason, event: r.event };
 }

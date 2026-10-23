@@ -1,14 +1,14 @@
 import type { Config } from "./config.ts";
 import { canonicalJson, omitPaths, sha256 } from "./hash.ts";
 import { brief, type Store } from "./store.ts";
-import type { Action, Decision, WakeEvent } from "./types.ts";
+import type { Action, Decision, Mode, WakeEvent } from "./types.ts";
 
 export interface GateOptions {
   /** Clock used when an event has no `ts`. Defaults to Date.now. */
   now?: () => number;
 }
 
-interface Verdict {
+export interface Verdict {
   action: Action;
   reason: string;
   rule?: string;
@@ -46,8 +46,19 @@ export class Gate {
       const prev = this.store.getState(ev.source, ev.key);
       const changed = prev?.fingerprint !== fingerprint;
       const verdict = this.evaluate(ev, ts, changed, prev?.lastWakeTs ?? null);
-      const flush = verdict.action === "wake" && this.config.flushOnWake;
-      const carried = flush ? this.store.takePending().map(brief) : [];
+
+      // What the caller is told to do can differ from the verdict (shadow, canary).
+      let mode: Mode = "enforce";
+      let delivered: Action = verdict.action;
+      if (this.config.mode === "shadow") {
+        mode = "shadow";
+        delivered = "wake";
+      } else if (isCanaryCandidate(verdict) && canaryRoll(ev, fingerprint) < this.config.canaryRate) {
+        mode = "canary";
+        delivered = "wake";
+      }
+
+      const carried = delivered === "wake" && this.config.flushOnWake ? this.store.takePending().map(brief) : [];
 
       const id = this.store.insertDecision({
         ts,
@@ -55,15 +66,37 @@ export class Gate {
         source: ev.source,
         key: ev.key,
         fingerprint,
-        action: verdict.action,
+        action: delivered,
+        verdict: verdict.action,
+        mode,
         reason: verdict.reason,
         rule: verdict.rule ?? null,
         changed: changed ? 1 : 0,
         event: ev,
       });
+      // Cooldown and budget follow the verdict, so shadow mode simulates enforcement faithfully
+      // and a canary does not spend the budget.
       this.store.putState(ev.source, ev.key, fingerprint, ts, verdict.action === "wake");
-      if (verdict.action === "batch") this.store.addPending(id);
-      return { ...verdict, source: ev.source, key: ev.key, ts, fingerprint, changed, id, ...(carried.length ? { batch: carried } : {}) };
+      if (delivered === "batch") this.store.addPending(id);
+      return {
+        ...verdict,
+        action: delivered,
+        verdict: verdict.action,
+        mode,
+        source: ev.source,
+        key: ev.key,
+        ts,
+        fingerprint,
+        changed,
+        id,
+        ...(mode === "canary"
+          ? {
+              canary: true as const,
+              note: `Released as a canary: your rules would have skipped this (${verdict.reason}). Record whether it was worth waking for: wakegate label ${id} wanted|unwanted.`,
+            }
+          : {}),
+        ...(carried.length ? { batch: carried } : {}),
+      };
     });
   }
 
@@ -125,4 +158,15 @@ export function inQuietHours(ts: number, start: string, end: string, tz?: string
   if (s === e) return false;
   const now = parts(ts, tz).minutes;
   return s < e ? now >= s && now < e : now >= s || now < e;
+}
+
+/** A skip that carries information. Duplicates are excluded: they add nothing worth a wake. */
+export function isCanaryCandidate(v: Verdict): boolean {
+  return v.action === "skip" && v.reason !== "duplicate";
+}
+
+/** Deterministic value in [0, 1) per event, so replays and tests are reproducible. */
+function canaryRoll(ev: WakeEvent, fingerprint: string): number {
+  const h = sha256(`${ev.source}\u0000${ev.key}\u0000${fingerprint}\u0000${ev.ts}`);
+  return parseInt(h.slice(0, 8), 16) / 0x1_0000_0000;
 }

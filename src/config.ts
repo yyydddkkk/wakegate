@@ -30,6 +30,10 @@ export interface Config {
   defaultAction: Action;
   /** After waking for a key, further changes within this window are batched. */
   cooldownSeconds: number;
+  /** enforce (default) delivers verdicts; shadow wakes on everything and only records what the rules would have done. */
+  mode: "enforce" | "shadow";
+  /** Fraction (0-1) of would-be skips, other than duplicates, delivered as a wake anyway so misses can be measured. */
+  canaryRate: number;
   /** On every wake, also hand over the events batched earlier, so a batch is never stranded. Default true. */
   flushOnWake: boolean;
   budget: {
@@ -109,7 +113,16 @@ export function parseConfig(text: string): Config {
   const ignore = raw.ignorePaths ?? [];
   if (!Array.isArray(ignore) || ignore.some((p) => typeof p !== "string")) throw new Error("ignorePaths: expected a list of strings");
 
+  const mode = raw.mode ?? "enforce";
+  if (mode !== "enforce" && mode !== "shadow") throw new Error('mode: expected "enforce" or "shadow"');
+  const canary = (raw.canary ?? {}) as Record<string, unknown>;
+  const canaryRate = canary.rate ?? 0;
+  if (typeof canaryRate !== "number" || canaryRate < 0 || canaryRate > 1) throw new Error("canary.rate: expected a number between 0 and 1");
+  if (mode === "shadow" && canaryRate > 0) throw new Error("canary.rate has no effect in shadow mode (everything already wakes)");
+
   return {
+    mode,
+    canaryRate,
     ignorePaths: ignore as string[],
     dedupe: raw.dedupe === undefined ? true : Boolean(raw.dedupe),
     bypass: compileRules(raw.bypass, "bypass", "wake"),
@@ -136,6 +149,8 @@ export function describeConfig(c: Config) {
     default: c.defaultAction,
     cooldownSeconds: c.cooldownSeconds,
     flushOnWake: c.flushOnWake,
+    mode: c.mode,
+    canaryRate: c.canaryRate,
     budget: c.budget,
   };
 }
