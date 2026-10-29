@@ -127,8 +127,9 @@ def run(events, yaml: str, flush: str) -> dict:
     }
 
 
-def main() -> None:
-    seeds = int(sys.argv[1]) if len(sys.argv) > 1 else 5
+def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    seeds = int(argv[0]) if argv else 5
     datasets = [generate(1000 + i) for i in range(seeds)]
     avg = lambda xs: sum(xs) / len(xs)  # noqa: E731
     f = lambda n, w=5, d=1: f"{n:.{d}f}".rjust(w)  # noqa: E731

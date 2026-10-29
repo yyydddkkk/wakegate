@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yyydddkkk/wakegate/schemas/trace.v1.schema.json",
+  "title": "wakegate decision trace",
+  "type": "object",
+  "required": [
+    "trace_version",
+    "decision_id",
+    "event",
+    "layers",
+    "result",
+    "synthesized"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "trace_version": {
+      "const": 1
+    },
+    "decision_id": {
+      "type": "integer"
+    },
+    "synthesized": {
+      "type": "boolean",
+      "description": "True when the decision predates traces: layers is empty and only the result is known."
+    },
+    "event": {
+      "type": "object",
+      "required": [
+        "source",
+        "key",
+        "ts",
+        "digest"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "integer",
+          "description": "Epoch milliseconds."
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "layers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/layer"
+      },
+      "description": "Only layers that ran. The cascade stops at the first final outcome."
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "verdict",
+        "decided_by",
+        "delivered",
+        "mode",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "verdict": {
+          "$ref": "#/$defs/action",
+          "description": "What the applied layers decided."
+        },
+        "decided_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delivered": {
+          "$ref": "#/$defs/action",
+          "description": "What the caller was told. Differs from verdict in shadow mode and for canaries."
+        },
+        "mode": {
+          "enum": [
+            "enforce",
+            "shadow",
+            "canary"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "action": {
+      "enum": [
+        "wake",
+        "skip",
+        "batch"
+      ]
+    },
+    "layer": {
+      "type": "object",
+      "required": [
+        "seq",
+        "layer",
+        "kind",
+        "mode",
+        "applied",
+        "outcome",
+        "final",
+        "reason",
+        "detail",
+        "views",
+        "cost"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "layer": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "detector",
+            "rules",
+            "classifier",
+            "governor"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "enforce",
+            "shadow",
+            "canary"
+          ]
+        },
+        "applied": {
+          "type": "boolean",
+          "description": "Whether this layer's outcome decided what the caller was told."
+        },
+        "outcome": {
+          "enum": [
+            "skip",
+            "wake",
+            "batch",
+            "defer",
+            "error"
+          ]
+        },
+        "final": {
+          "type": "boolean",
+          "description": "True: nothing later may change this. False: a proposal governors may still limit."
+        },
+        "reason": {
+          "type": "string"
+        },
+        "rule": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "detail": {
+          "type": "object"
+        },
+        "views": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "cost": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ms": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "tokens_in": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tokens_out": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "usd": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

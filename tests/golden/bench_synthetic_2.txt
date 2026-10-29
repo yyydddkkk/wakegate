@@ -1,0 +1,50 @@
+14 days x 2 seeds. Avg 1388 events and 68 must-wake events per run.
+Columns: wakes/run | must-wake delivered: instantly / within 1h / ever (worst seed) | nice-to-know ever | wasted wakes (noise+redundant) | p95 delay of must-wake delivered (min)
+
+--- batch delivery: the agent never calls flush (only flushOnWake can deliver a batch) ---
+naive: wake on everything      1388 | 100.0% 100.0% 100.0% (100.0%) | 100.0% |  1122 |      0
+BEFORE shipped example          144 |  33.1%  33.1%  33.1% ( 28.1%) |  20.3% |    81 |      0
+AFTER  shipped example          174 |  83.7%  85.9%  99.2% ( 98.4%) |  98.0% |    78 |    753
+BEFORE tuned, cooldown only     174 |  82.0%  82.0%  82.0% ( 78.1%) |  58.8% |     1 |      0
+AFTER  tuned, cooldown only     185 | 100.0% 100.0% 100.0% (100.0%) |  99.5% |     0 |      0
+BEFORE tuned, full (batch)      134 |  68.7%  68.7%  68.7% ( 64.1%) |  43.6% |     0 |      0
+AFTER  tuned, full (batch)      148 |  95.5%  95.5%  99.2% ( 98.4%) |  99.0% |     0 |      0
+BEFORE tuned, full (skip)       134 |  68.7%  68.7%  68.7% ( 64.1%) |  43.6% |     0 |      0
+AFTER  tuned, full (skip)       148 |  95.5%  95.5%  99.2% ( 98.4%) |  81.6% |     0 |      0
+
+--- batch delivery: the agent also flushes by hand daily at 08:00 UTC ---
+naive: wake on everything      1388 | 100.0% 100.0% 100.0% (100.0%) | 100.0% |  1122 |      0
+BEFORE shipped example          144 |  33.1%  33.1%  94.9% ( 93.0%) |  95.4% |    81 |   1230
+AFTER  shipped example          174 |  83.7%  85.9%  99.2% ( 98.4%) |  98.0% |    78 |    697
+BEFORE tuned, cooldown only     174 |  82.0%  82.0% 100.0% (100.0%) |  97.4% |     1 |   1181
+AFTER  tuned, cooldown only     185 | 100.0% 100.0% 100.0% (100.0%) |  99.5% |     0 |      0
+BEFORE tuned, full (batch)      134 |  68.7%  68.7%  99.2% ( 98.4%) |  96.9% |     0 |   1208
+AFTER  tuned, full (batch)      148 |  95.5%  95.5%  99.2% ( 98.4%) |  99.0% |     0 |      0
+BEFORE tuned, full (skip)       134 |  68.7%  68.7%  83.5% ( 79.7%) |  77.8% |     0 |   1199
+AFTER  tuned, full (skip)       148 |  95.5%  95.5%  99.2% ( 98.4%) |  81.6% |     0 |      0
+
+--- why must-wake events did not wake instantly (agent never flushes by hand; summed over seeds) ---
+BEFORE shipped example
+    never delivered: batch:daily-budget x71, batch:cooldown x10, batch:quiet-hours x6, skip:rule:ignore-bots x3
+    delivered late:  none
+AFTER  shipped example
+    never delivered: batch:quiet-hours x1
+    delivered late:  batch:daily-budget x16, batch:quiet-hours x5
+BEFORE tuned, cooldown only
+    never delivered: batch:cooldown x24
+    delivered late:  none
+AFTER  tuned, cooldown only
+    never delivered: none
+    delivered late:  none
+BEFORE tuned, full (batch)
+    never delivered: batch:daily-budget x21, batch:cooldown x15, batch:quiet-hours x6
+    delivered late:  none
+AFTER  tuned, full (batch)
+    never delivered: batch:quiet-hours x1
+    delivered late:  batch:quiet-hours x5
+BEFORE tuned, full (skip)
+    never delivered: skip:daily-budget x21, batch:cooldown x15, batch:quiet-hours x6
+    delivered late:  none
+AFTER  tuned, full (skip)
+    never delivered: batch:quiet-hours x1
+    delivered late:  batch:quiet-hours x5

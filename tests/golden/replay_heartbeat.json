@@ -1,0 +1,22 @@
+{
+  "baseline_cost": 481.59999999999997,
+  "batch_delivered": 3,
+  "batch_stranded": 0,
+  "canaries_released": 0,
+  "counts": {
+    "batch": 3,
+    "skip": 336,
+    "wake": 5
+  },
+  "gated_cost": 7.0,
+  "reasons": {
+    "batch:cooldown": 2,
+    "batch:quiet-hours": 1,
+    "skip:duplicate": 335,
+    "skip:rule:ignore-bots": 1,
+    "wake:bypass:critical": 1,
+    "wake:default": 3,
+    "wake:rule:review-requests": 1
+  },
+  "total": 344
+}

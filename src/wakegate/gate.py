@@ -3,10 +3,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from .builtin_layers import default_layers
 from .config import Config
 from .hashing import canonical_json, omit_paths, sha256
+from .layers import Layer, LayerContext
+from .pipeline import run_pipeline
 from .store import Store, brief
-from .timeutil import day_of, in_quiet_hours, now_ms
+from .timeutil import day_of, now_ms
 from .types import Action, Decision, Mode, WakeEvent
 
 
@@ -18,23 +21,26 @@ class Verdict:
 
 
 class Gate:
-    """Decision order, first hit wins:
+    """Runs an event through the layers and records the decision and its trace.
 
-      1. duplicate     same fingerprint as last time for this key  -> skip
-      2. bypass        matches a bypass rule                       -> wake (ignores 4 and 5)
-      3. rules         first matching rule, else the default
-      4. cooldown      woke for this key too recently              -> batch
-      5. quiet hours / daily budget                                -> batch or skip
+    Layers, in order (see builtin_layers.py), first final result wins:
 
-    A matching rule can list `exempt: [cooldown, quietHours, budget]` to skip some of 4 and 5.
+      dedupe        same fingerprint as last time for this key  -> skip
+      bypass        matches a bypass rule                       -> wake (governors do not apply)
+      rules         first matching rule, else the default
+      cooldown      woke for this key too recently              -> batch
+      quiet_hours / budget                                      -> batch or skip
+
+    A matching rule can list `exempt: [cooldown, quietHours, budget]` to skip some governors.
     On a wake with flush_on_wake (default), batched events ride along in `batch`.
-    Every decision, including skips, is written to the audit log.
+    Every decision, including skips, is written to the audit log with a record of each layer.
     """
 
-    def __init__(self, config: Config, store: Store, now: Callable[[], int] = now_ms) -> None:
+    def __init__(self, config: Config, store: Store, now: Callable[[], int] = now_ms, layers: list[Layer] | None = None) -> None:
         self.config = config
         self.store = store
         self._now = now
+        self.layers = layers if layers is not None else default_layers(config)
 
     def decide(self, event: WakeEvent) -> Decision:
         c = self.config
@@ -49,7 +55,9 @@ class Gate:
         with self.store.transaction():
             prev = self.store.get_state(ev.source, ev.key)
             changed = prev is None or prev.fingerprint != fingerprint
-            verdict = self._evaluate(ev, ts, changed, prev.last_wake_ts if prev else None)
+            ctx = LayerContext(ev, ev.to_dict(), ts, fingerprint, changed, prev, c, self.store)
+            outcome = run_pipeline(self.layers, ctx)
+            verdict = Verdict(outcome.final.outcome, outcome.final.reason, outcome.final.rule)  # type: ignore[arg-type]
 
             # What the caller is told to do can differ from the verdict (shadow, canary).
             mode: Mode = "enforce"
@@ -66,6 +74,14 @@ class Gate:
                 action=delivered, verdict=verdict.action, mode=mode, reason=verdict.reason, rule=verdict.rule,
                 changed=changed, event=ev.to_dict(),
             )
+            # How each layer's outcome relates to what was delivered: in shadow nothing was applied,
+            # and for a canary the layer that skipped the event was overridden.
+            for run in outcome.runs:
+                if mode == "shadow":
+                    run.mode, run.applied = "shadow", False
+                elif mode == "canary" and run.layer == outcome.decided_by:
+                    run.mode, run.applied = "canary", False
+            self.store.insert_layer_runs(id_, outcome.decided_by, outcome.runs)
             # Cooldown and budget follow the verdict, so shadow mode simulates enforcement faithfully
             # and a canary does not spend the budget.
             self.store.put_state(ev.source, ev.key, fingerprint, ts, verdict.action == "wake")
@@ -83,31 +99,6 @@ class Gate:
             action=delivered, verdict=verdict.action, mode=mode, reason=verdict.reason, rule=verdict.rule,
             canary=mode == "canary", note=note, batch=carried or None,
         )
-
-    def _evaluate(self, ev: WakeEvent, ts: int, changed: bool, last_wake_ts: int | None) -> Verdict:
-        c = self.config
-        if c.dedupe and not changed:
-            return Verdict("skip", "duplicate")
-
-        view = ev.to_dict()
-        bypass = next((r for r in c.bypass if r.when(view)), None)
-        if bypass:
-            return Verdict("wake", f"bypass:{bypass.name}", bypass.name)
-
-        hit = next((r for r in c.rules if r.when(view)), None)
-        exempt = set(hit.exempt) if hit else set()
-        proposed = Verdict(hit.then, f"rule:{hit.name}", hit.name) if hit else Verdict(c.default_action, "default")
-        if proposed.action != "wake":
-            return proposed
-
-        if "cooldown" not in exempt and c.cooldown_seconds > 0 and last_wake_ts is not None and ts - last_wake_ts < c.cooldown_seconds * 1000:
-            return Verdict("batch", "cooldown", proposed.rule)
-        b = c.budget
-        if "quietHours" not in exempt and b.quiet_hours and in_quiet_hours(ts, b.quiet_hours[0], b.quiet_hours[1], b.timezone):
-            return Verdict("batch", "quiet-hours", proposed.rule)
-        if "budget" not in exempt and b.max_wakes_per_day is not None and self.store.count_wakes(day_of(ts, b.timezone)) >= b.max_wakes_per_day:
-            return Verdict(b.over_budget, "daily-budget", proposed.rule)  # type: ignore[arg-type]
-        return proposed
 
 
 def is_canary_candidate(action: str, reason: str) -> bool:

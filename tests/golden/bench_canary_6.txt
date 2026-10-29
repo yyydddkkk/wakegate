@@ -1,0 +1,12 @@
+6 seeds, 14 days of synthetic traffic each. A perfect reviewer labels every canary.
+
+A: bot rule hides deploy failures
+  canary   2.0%: ~  7 labels of 270 suppressed | true miss rate   0.7% | estimate   4.5% | mean CI width  40.1% | CI contained the truth in 4/6 runs
+  canary   5.0%: ~ 16 labels of 270 suppressed | true miss rate   0.7% | estimate   2.2% | mean CI width  22.9% | CI contained the truth in 5/6 runs
+  canary  20.0%: ~ 55 labels of 270 suppressed | true miss rate   0.7% | estimate   1.6% | mean CI width   8.9% | CI contained the truth in 6/6 runs
+
+B: all CI skipped, no bypass for main failures
+  canary   2.0%: ~  8 labels of 289 suppressed | true miss rate   1.6% | estimate   4.5% | mean CI width  38.8% | CI contained the truth in 5/6 runs
+  canary   5.0%: ~ 16 labels of 289 suppressed | true miss rate   1.6% | estimate   2.2% | mean CI width  22.2% | CI contained the truth in 6/6 runs
+  canary  20.0%: ~ 59 labels of 289 suppressed | true miss rate   1.6% | estimate   2.2% | mean CI width   9.2% | CI contained the truth in 6/6 runs
+

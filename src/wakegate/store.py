@@ -30,6 +30,15 @@ CREATE TABLE IF NOT EXISTS labels (
   sample INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS review_queue (decision_id INTEGER PRIMARY KEY, picked_ts INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS layer_runs (
+  decision_id INTEGER NOT NULL, seq INTEGER NOT NULL,
+  layer TEXT NOT NULL, kind TEXT NOT NULL, mode TEXT NOT NULL, applied INTEGER NOT NULL,
+  outcome TEXT NOT NULL, final INTEGER NOT NULL, reason TEXT, rule TEXT, confidence REAL,
+  duration_ms REAL, tokens_in INTEGER, tokens_out INTEGER, cost_usd REAL,
+  detail_json TEXT,
+  PRIMARY KEY (decision_id, seq)
+);
+CREATE TABLE IF NOT EXISTS decision_meta (decision_id INTEGER PRIMARY KEY, decided_by TEXT);
 CREATE TABLE IF NOT EXISTS http_validators (
   url TEXT PRIMARY KEY, etag TEXT, last_modified TEXT
 );
@@ -139,6 +148,28 @@ class Store:
              json.dumps(event, ensure_ascii=False, separators=(",", ":"))),
         )
         return int(cur.lastrowid)
+
+    def insert_layer_runs(self, decision_id: int, decided_by: str | None, runs: list) -> None:
+        """Records what each layer saw and returned. `runs` are pipeline.LayerRun objects."""
+        self._db.execute("INSERT OR REPLACE INTO decision_meta (decision_id, decided_by) VALUES (?,?)", (decision_id, decided_by))
+        for r in runs:
+            res = r.result
+            self._db.execute(
+                """INSERT INTO layer_runs (decision_id, seq, layer, kind, mode, applied, outcome, final, reason, rule, confidence,
+                                           duration_ms, tokens_in, tokens_out, cost_usd, detail_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (decision_id, r.seq, r.layer, r.kind, r.mode, 1 if r.applied else 0, res.outcome, 1 if res.final else 0,
+                 res.reason, res.rule, res.confidence, r.duration_ms, res.cost.tokens_in, res.cost.tokens_out, res.cost.usd,
+                 json.dumps(res.detail, ensure_ascii=False, separators=(",", ":"))),
+            )
+
+    def get_layer_runs(self, decision_id: int) -> tuple[str | None, list[dict[str, Any]]]:
+        """(decided_by, layer rows in order). Empty for decisions made before traces existed."""
+        meta = self._db.execute("SELECT decided_by FROM decision_meta WHERE decision_id=?", (decision_id,)).fetchone()
+        rows = [
+            dict(r) for r in self._db.execute("SELECT * FROM layer_runs WHERE decision_id=? ORDER BY seq", (decision_id,))
+        ]
+        return (meta["decided_by"] if meta else None), rows
 
     def count_wakes(self, day: str) -> int:
         """Wakes the rules approved today. Counted by verdict, so shadow mode simulates the budget and canaries do not spend it."""

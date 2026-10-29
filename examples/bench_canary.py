@@ -42,8 +42,9 @@ CONFIGS = [
 ]
 
 
-def main() -> None:
-    seeds = int(sys.argv[1]) if len(sys.argv) > 1 else 40
+def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    seeds = int(argv[0]) if argv else 40
     print(f"{seeds} seeds, 14 days of synthetic traffic each. A perfect reviewer labels every canary.\n")
     pct = lambda x: f"{100 * x:.1f}%".rjust(6)  # noqa: E731
     for name, yaml in CONFIGS:
