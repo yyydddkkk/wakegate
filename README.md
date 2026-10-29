@@ -116,6 +116,17 @@ miss estimate: 1 of 40 sampled suppressed events were wanted = 2.5% (95% CI 0.4%
 
 **What this can and cannot tell you.** `examples/bench_canary.py` checks the estimator against synthetic traffic with known labels and a perfect reviewer: the intervals contain the true rate in about 90-100% of runs, so the estimate is honest. It is also *wide*: with a true miss rate of 1-2% among suppressed events, a 2% canary gives about 8 labels in two weeks and an interval about 36 points wide; 20% gives about 59 labels and about 8 points. Rare misses need hundreds of labels to see. Treat a canary as a tripwire ("a rule just hid something wanted: look at it") rather than a precise rate, and read the per-rule view, not only the overall number. The estimate assumes the reviewer is right; a tired reviewer or an agent labelling its own wakes will be noisier.
 
+## Inspecting a decision
+
+Every decision records what each layer saw and returned. `wakegate log --trace` shows the chain per decision:
+
+```
+#2  ...  batch  github/pr/1  quiet-hours
+      dedupe:defer > bypass:defer > rules:wake(default) > cooldown:defer > quiet_hours:batch(quiet-hours)
+```
+
+`wakegate inspect <id>` prints one decision layer by layer; `--layer rules` adds the raw event that layer saw, marked as untrusted external content and capped in size (`--max-bytes`). Every inspection is written to an access log and counted in `wakegate report`, which also shows a funnel of how far events got in each layer. The trace is plain JSON validated by [`schemas/trace.v1.schema.json`](schemas/trace.v1.schema.json), and the `wakegate_inspect` MCP tool returns the same thing. Design and plan: [docs/design/layers-and-trace.md](docs/design/layers-and-trace.md).
+
 ## MCP server
 
 ```bash
@@ -132,6 +143,7 @@ wakegate mcp --config wakegate.yaml --db .wakegate/state.db
 | `wakegate_catchup` | What changed since `24h` / an ISO date, plus how many events are batched. Changes your `skip` rules dropped are left out and only counted (`includeFiltered` shows them) | yes |
 | `wakegate_rules` | The active rules, cooldown and budget, plus today's standing: quiet hours now, wakes used and left, batch size. Lets an agent explain a verdict | yes |
 | `wakegate_flush` | Take the batched events once and clear them (not needed after a wake with `flushOnWake`) | no |
+| `wakegate_inspect` | The trace of one decision, and with `layer` the raw event that layer saw (untrusted, capped, logged) | no (writes the access log) |
 | `wakegate_log` | Recent decisions with ids, verdicts and reasons | yes |
 | `wakegate_label` | Record `wanted` / `unwanted` for a decision id (canaries and review samples feed the miss estimate) | no |
 | `wakegate_report` | What the rules decided, wakes shadow mode would have avoided, label counts, miss estimate with interval and per-rule breakdown | yes |

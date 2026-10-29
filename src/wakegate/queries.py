@@ -170,9 +170,25 @@ def report(store: Store, since_ms: int, cost_per_wake: float | None = None, min_
         ),
         key=lambda x: (-x["wanted"], -x["suppressed"]),
     )
+    funnel = []
+    for f in store.funnel_rows(since_ms):
+        decided = (f["skip"] or 0) + (f["wake"] or 0) + (f["batch"] or 0)
+        funnel.append({
+            "layer": f["layer"], "kind": f["kind"], "entered": f["entered"],
+            "skip": f["skip"] or 0, "wake": f["wake"] or 0, "batch": f["batch"] or 0,
+            # Handed on: a defer, or a wake proposal that a governor could still limit.
+            "passed": f["entered"] - decided - (f["errors"] or 0),
+            "errors": f["errors"] or 0,
+            "costMs": round(f["ms"] or 0, 3), "tokensIn": f["tokens_in"], "tokensOut": f["tokens_out"], "costUsd": f["usd"],
+        })
+    untraced = store.count_untraced_since(since_ms)
+
     return {
         "since": iso(since_ms),
         "events": len(rows),
+        "funnel": funnel,
+        "untracedDecisions": untraced,
+        "accessLog": store.access_counts_since(since_ms),
         "verdicts": verdicts,
         "byMode": by_mode,
         "topReasons": [

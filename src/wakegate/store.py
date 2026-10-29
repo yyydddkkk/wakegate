@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS layer_runs (
   detail_json TEXT,
   PRIMARY KEY (decision_id, seq)
 );
+CREATE TABLE IF NOT EXISTS access_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor TEXT NOT NULL,
+  kind TEXT NOT NULL, decision_id INTEGER, layer TEXT
+);
 CREATE TABLE IF NOT EXISTS decision_meta (decision_id INTEGER PRIMARY KEY, decided_by TEXT);
 CREATE TABLE IF NOT EXISTS http_validators (
   url TEXT PRIMARY KEY, etag TEXT, last_modified TEXT
@@ -170,6 +174,37 @@ class Store:
             dict(r) for r in self._db.execute("SELECT * FROM layer_runs WHERE decision_id=? ORDER BY seq", (decision_id,))
         ]
         return (meta["decided_by"] if meta else None), rows
+
+    def log_access(self, ts: int, actor: str, kind: str, decision_id: int | None = None, layer: str | None = None) -> None:
+        """Every time a trace or a layer's raw input is shown to a person or a model."""
+        self._db.execute(
+            "INSERT INTO access_log (ts, actor, kind, decision_id, layer) VALUES (?,?,?,?,?)", (ts, actor, kind, decision_id, layer)
+        )
+
+    def access_counts_since(self, ts: int) -> dict[str, int]:
+        rows = self._db.execute("SELECT kind, COUNT(*) AS n FROM access_log WHERE ts >= ? GROUP BY kind", (ts,))
+        return {r["kind"]: r["n"] for r in rows}
+
+    def funnel_rows(self, since_ts: int) -> list[dict[str, Any]]:
+        """Per layer: how many decisions reached it, where they ended, and what it cost."""
+        sql = """
+        SELECT lr.layer AS layer, lr.kind AS kind, AVG(lr.seq) AS avg_seq, COUNT(*) AS entered,
+               SUM(lr.outcome = 'error') AS errors,
+               SUM(lr.outcome = 'skip'  AND dm.decided_by = lr.layer) AS skip,
+               SUM(lr.outcome = 'wake'  AND dm.decided_by = lr.layer) AS wake,
+               SUM(lr.outcome = 'batch' AND dm.decided_by = lr.layer) AS batch,
+               SUM(lr.duration_ms) AS ms, SUM(lr.tokens_in) AS tokens_in, SUM(lr.tokens_out) AS tokens_out, SUM(lr.cost_usd) AS usd
+        FROM layer_runs lr
+        JOIN decisions d ON d.id = lr.decision_id
+        LEFT JOIN decision_meta dm ON dm.decision_id = lr.decision_id
+        WHERE d.ts >= ?
+        GROUP BY lr.layer, lr.kind ORDER BY avg_seq, lr.layer"""
+        return [dict(r) for r in self._db.execute(sql, (since_ts,))]
+
+    def count_untraced_since(self, ts: int) -> int:
+        return self._db.execute(
+            "SELECT COUNT(*) AS n FROM decisions d WHERE d.ts >= ? AND NOT EXISTS (SELECT 1 FROM decision_meta m WHERE m.decision_id = d.id)", (ts,)
+        ).fetchone()["n"]
 
     def count_wakes(self, day: str) -> int:
         """Wakes the rules approved today. Counted by verdict, so shadow mode simulates the budget and canaries do not spend it."""

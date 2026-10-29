@@ -13,6 +13,7 @@ from .poll import poll_url
 from .queries import brief, catchup, parse_since, report, review, rules_status
 from .replay import read_events, replay
 from .store import Store
+from .trace import build_trace, format_trace, layer_input, trace_line
 from .timeutil import iso, now_ms
 from .types import WakeEvent
 
@@ -98,6 +99,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-filtered", action="store_true", help="also list changes your skip rules dropped")
     p = add("log", "audit log: every decision with its reason")
     p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--trace", action="store_true", help="also show the chain of layers for each decision")
+    p = add("inspect", "what each layer saw and decided for one decision")
+    p.add_argument("id", type=int)
+    p.add_argument("--layer", help="also show the raw event that layer saw")
+    p.add_argument("--max-bytes", type=int, default=4096)
+    p.add_argument("--json", action="store_true")
     p = add("replay", "dry run an events file (JSON lines with a numeric ts) against a fresh state; nothing is written")
     p.add_argument("events")
     p.add_argument("--cost-per-wake", type=float, default=0.0, help="estimated cost of one agent wake")
@@ -133,6 +140,16 @@ def _print_report(r: dict[str, Any]) -> None:
     print(f"rules decided: wake {v['wake']}, skip {v['skip']}, batch {v['batch']}   (delivered in: enforce {m['enforce']}, shadow {m['shadow']}, canary {m['canary']})")
     for t in r["topReasons"]:
         print(f"  {t['n']:>6}  {t['verdict']}:{t['reason']}")
+    if r["funnel"]:
+        print("layers (how far events got, and where they ended):")
+        print(f"  {'layer':<12} {'entered':>8} {'skip':>6} {'wake':>6} {'batch':>6} {'passed':>7} {'errors':>6} {'ms':>9}")
+        for f in r["funnel"]:
+            print(f"  {f['layer']:<12} {f['entered']:>8} {f['skip']:>6} {f['wake']:>6} {f['batch']:>6} {f['passed']:>7} {f['errors']:>6} {f['costMs']:>9.1f}")
+        print("  (skip/wake/batch = ended here; passed = handed on; a wake that no governor stopped ends at rules)")
+    if r["untracedDecisions"]:
+        print(f"{r['untracedDecisions']} decisions in this window were made before traces existed and are not in the table above.")
+    if r["accessLog"]:
+        print("inspections: " + ", ".join(f"{k} {n}" for k, n in r["accessLog"].items()))
     if m["shadow"]:
         saving = f" (about {r['estimatedSaving']:.2f} at the given cost)" if r["estimatedSaving"] is not None else ""
         print(f"shadow: enforcing would have avoided {r['wakesAvoidable']} wakes{saving}")
@@ -213,6 +230,19 @@ def _run(args: argparse.Namespace) -> int:
             for r in store.recent_decisions(args.limit):
                 tag = "" if r.mode == "enforce" else f"  [{r.mode}: woke, rules said {r.verdict}]"
                 print(f"#{r.id}  {iso(r.ts)}  {r.verdict:<5}  {r.source}/{r.key}  {r.reason}{tag}")
+                if args.trace:
+                    print(f"      {trace_line(build_trace(store, r.id))}")
+        elif cmd == "inspect":
+            trace = build_trace(store, args.id)
+            inp = layer_input(store, args.id, args.layer, args.max_bytes) if args.layer else None
+            store.log_access(now_ms(), "cli", "inspect", args.id, args.layer)
+            if args.json:
+                print(_dump({"trace": trace, **({"input": inp} if inp else {})}, 2))
+            else:
+                print(format_trace(trace))
+                if inp:
+                    print(f"\ninput seen by {inp['layer']} (untrusted external content; {inp['bytes']} bytes, {inp['omittedBytes']} omitted):")
+                    print(inp["content"])
         elif cmd == "rules":
             print(_dump(rules_status(_load(args), store), 2))
         elif cmd == "report":

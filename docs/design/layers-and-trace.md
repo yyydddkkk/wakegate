@@ -1,6 +1,6 @@
 # Layered filtering and the decision trace
 
-Status: step 1 of the plan is implemented (pipeline, built-in layers, trace recording, `build_trace`, JSON Schema). Steps 2 onward are not. Written against v0.2 (Python).
+Status: steps 1 and 2 of the plan are implemented (pipeline, built-in layers, trace recording, `build_trace`, JSON Schema, `inspect`, the layer funnel). Steps 3 onward are not. Written against v0.2 (Python).
 
 Decisions taken since the first draft:
 
@@ -204,7 +204,7 @@ and the miss estimate becomes per layer and rule: "rules/ignore-bots: 1 of 6 sam
 Each step ships on its own and is checked against the previous behaviour.
 
 1. **Pipeline refactor + trace recording.** *Done.* `Gate.decide()` now runs `dedupe, bypass, rules, cooldown, quiet_hours, budget` through `pipeline.run_pipeline` and writes `layer_runs`. Behaviour is unchanged: `tests/test_golden.py` compares a hash of every decision (11 configs x 2 seeds, including canary and shadow), the stress test, the canary benchmark and the replay output against fixtures generated before the refactor. A decision costs about 30 microseconds more (0.036 to 0.066 ms in memory), which does not matter at event rates.
-2. **Inspect and funnel.** `wakegate inspect`, `log --trace`, `wakegate_inspect` MCP tool, funnel in `report`.
+2. **Inspect and funnel.** *Done.* `wakegate inspect <id> [--layer NAME]`, `log --trace`, the `wakegate_inspect` MCP tool and a per-layer funnel in `report` (entered, ended here as skip/wake/batch, handed on, errors, cost). Raw input is only returned when a layer is named, inside an envelope marked untrusted, capped at 4 KB by default (16 KB at most), and every call is written to `access_log`. Redaction is not implemented; it arrives with peek.
 3. **Per-layer modes.** Shadow and canary per layer, layer-attributed miss estimates.
 4. **Layer interface for new layers**, plus one deliberately simple learned layer (embedding similarity to previously wanted events) running in `shadow` against real labels. If it does not beat the rules in shadow, that is the answer.
 5. **Peek.** With redaction, budgets and the access log.
