@@ -4,7 +4,7 @@ A small, framework-agnostic gate that decides **whether an event should wake you
 
 Always-on agents burn money and attention waking the LLM for events that need no action: heartbeats that return "nothing to do", the same webhook delivered twice, a bot comment, a burst of ten edits to one ticket. `wakegate` sits in front of the agent and answers one question per event: `wake`, `skip` or `batch`, with a recorded reason.
 
-> Status: v0.1, early. Deterministic rules only. No learned model, no hosted service.
+> Status: v0.2, early. Deterministic rules only. No learned model, no hosted service. Rewritten from TypeScript (tag `v0.1-typescript`) to Python; the benchmark outputs of the two versions were compared and are identical.
 
 ## Why not just a shell script?
 
@@ -19,12 +19,14 @@ A pre-wake script is a fine start, and many frameworks have one. wakegate adds t
 
 ## Quick start
 
-Requires Node >= 22.18 (runs TypeScript directly and uses the built-in `node:sqlite`).
+Requires Python >= 3.11 and [uv](https://docs.astral.sh/uv/). Not on PyPI yet, so install from a checkout:
 
 ```bash
-npm install
-npm run wakegate -- init                       # writes wakegate.yaml
-echo '{"source":"github","key":"pr/1","data":{"state":"open"}}' | npm run -s wakegate -- check
+git clone https://github.com/yyydddkkk/wakegate.git && cd wakegate
+uv tool install .            # puts `wakegate` on your PATH; use `uv tool install --editable .` while hacking on it
+
+wakegate init                # writes wakegate.yaml
+echo '{"source":"github","key":"pr/1","data":{"state":"open"}}' | wakegate check
 echo $?   # 0 wake | 10 skip | 11 batch | 1 error
 ```
 
@@ -61,8 +63,8 @@ See [`examples/wakegate.yaml`](examples/wakegate.yaml).
 ## Replay demo (synthetic)
 
 ```bash
-node examples/gen-heartbeat.ts > examples/heartbeat.jsonl
-node src/cli.ts replay examples/heartbeat.jsonl --config examples/wakegate.yaml --cost-per-wake 1.40
+uv run python examples/gen_heartbeat.py > examples/heartbeat.jsonl
+uv run wakegate replay examples/heartbeat.jsonl --config examples/wakegate.yaml --cost-per-wake 1.40
 ```
 
 ```
@@ -72,10 +74,11 @@ cost: 481.60 -> 7.00  (saved 474.60, 98.5%)
 batched: 3 delivered with a later wake (no extra cost), 0 still waiting at the end of the log.
 ```
 
-**Read this number carefully.** The input is generated: a week of 30-minute heartbeats (336 of the 344 events are noise by construction) plus 8 hand-written real events. The 98.5% describes that scenario, not any real workload. The `1.40` per wake is a placeholder taken from a self-reported figure in a public issue; replace it with yours. 
+**Read this number carefully.** The input is generated: a week of 30-minute heartbeats (336 of the 344 events are noise by construction) plus 8 hand-written real events. The 98.5% describes that scenario, not any real workload. The `1.40` per wake is a placeholder taken from a self-reported figure in a public issue; replace it with yours.
+
 ## Stress test on synthetic traffic
 
-`node examples/bench-synthetic.ts` replays 14 days of generated traffic (heartbeats, PRs, mail, pager alerts, CI) where every event has a ground-truth label, so misses can be counted. The numbers below are 5 seeds, about 71 must-wake events each, agent never calling `flush` by hand:
+`uv run python examples/bench_synthetic.py` replays 14 days of generated traffic (heartbeats, PRs, mail, pager alerts, CI) where every event has a ground-truth label, so misses can be counted. The numbers below are 5 seeds, about 71 must-wake events each, agent never calling `flush` by hand:
 
 | Config | Must-wake delivered instantly | ...eventually | Nice-to-know eventually |
 |---|---|---|---|
@@ -95,6 +98,8 @@ What this shows, and what it does not:
 
 ## Measuring what the rules miss
 
+Step-by-step setup for trying this on your own traffic: [docs/shadow-mode.md](docs/shadow-mode.md).
+
 A gate that drops events is only trustworthy if you can see what it dropped. Two tools, both off by default:
 
 - **Shadow mode** (`mode: shadow` in the config, or `--shadow` on any command): every event is delivered as a wake, exactly as without wakegate. The verdict the rules *would* have given is recorded, and cooldown and budget are simulated from those verdicts. Try it on live traffic with nothing at risk, then read `wakegate report` to see how many wakes enforcing would have avoided.
@@ -109,7 +114,7 @@ miss estimate: 1 of 40 sampled suppressed events were wanted = 2.5% (95% CI 0.4%
   rule ignore-bots: 1 of 6 sampled were wanted ...
 ```
 
-**What this can and cannot tell you.** `examples/bench-canary.ts` checks the estimator against synthetic traffic with known labels and a perfect reviewer: the intervals contain the true rate in about 90-100% of runs, so the estimate is honest. It is also *wide*: with a true miss rate of 1-2% among suppressed events, a 2% canary gives about 8 labels in two weeks and an interval about 36 points wide; 20% gives about 59 labels and about 8 points. Rare misses need hundreds of labels to see. Treat a canary as a tripwire ("a rule just hid something wanted: look at it") rather than a precise rate, and read the per-rule view, not only the overall number. The estimate assumes the reviewer is right; a tired reviewer or an agent labelling its own wakes will be noisier.
+**What this can and cannot tell you.** `examples/bench_canary.py` checks the estimator against synthetic traffic with known labels and a perfect reviewer: the intervals contain the true rate in about 90-100% of runs, so the estimate is honest. It is also *wide*: with a true miss rate of 1-2% among suppressed events, a 2% canary gives about 8 labels in two weeks and an interval about 36 points wide; 20% gives about 59 labels and about 8 points. Rare misses need hundreds of labels to see. Treat a canary as a tripwire ("a rule just hid something wanted: look at it") rather than a precise rate, and read the per-rule view, not only the overall number. The estimate assumes the reviewer is right; a tired reviewer or an agent labelling its own wakes will be noisier.
 
 ## MCP server
 
@@ -118,7 +123,7 @@ wakegate mcp --config wakegate.yaml --db .wakegate/state.db
 ```
 
 ```json
-{ "mcpServers": { "wakegate": { "command": "npx", "args": ["wakegate", "mcp", "--config", "/path/to/wakegate.yaml", "--db", "/path/to/state.db"] } } }
+{ "mcpServers": { "wakegate": { "command": "wakegate", "args": ["mcp", "--config", "/path/to/wakegate.yaml", "--db", "/path/to/state.db"] } } }
 ```
 
 | Tool | What it does | Read-only |
@@ -137,15 +142,16 @@ The rules are fixed when the server starts; a client cannot change them. Over st
 
 ## Library
 
-```ts
-import { Gate, Store, loadConfig } from "wakegate";
+```python
+from wakegate import Gate, Store, WakeEvent, load_config
 
-const gate = new Gate(loadConfig("wakegate.yaml"), new Store(".wakegate/state.db"));
-const d = gate.decide({ source: "github", key: "pr/1", data: { state: "open" } });
-if (d.action === "wake") await runAgent();
+gate = Gate(load_config("wakegate.yaml"), Store(".wakegate/state.db"))
+d = gate.decide(WakeEvent("github", "pr/1", data={"state": "open"}))
+if d.action == "wake":
+    run_agent()
 ```
 
-## Not in v0.1
+## Not in this version
 
 Stratified sampling (per-rule quotas), a labelling UI, adaptive polling schedules, a learned wake model, OAuth/credential handling, per-service connectors, a hosted service. The audit log is meant to become the training data for a learned layer later; that has not been built or validated.
 
@@ -158,9 +164,8 @@ Stratified sampling (per-rule quotas), a labelling UI, adaptive polling schedule
 ## Development
 
 ```bash
-npm test          # node:test, no extra dependencies
-npm run typecheck
-npm run build     # compiles to dist/
+uv sync
+uv run pytest
 ```
 
 MIT
