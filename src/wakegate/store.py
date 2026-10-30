@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS layer_runs (
   detail_json TEXT,
   PRIMARY KEY (decision_id, seq)
 );
+CREATE TABLE IF NOT EXISTS outcomes (
+  decision_id INTEGER PRIMARY KEY, outcome TEXT NOT NULL, ts INTEGER NOT NULL, source TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS access_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor TEXT NOT NULL,
   kind TEXT NOT NULL, decision_id INTEGER, layer TEXT
@@ -180,6 +183,29 @@ class Store:
             dict(r) for r in self._db.execute("SELECT * FROM layer_runs WHERE decision_id=? ORDER BY seq", (decision_id,))
         ]
         return (meta["decided_by"] if meta else None), rows
+
+    def set_outcome(self, ids: list[int], outcome: str, ts: int, source: str) -> None:
+        """What a wake produced: `acted`, `noop` (nothing to do) or `error` (the run failed).
+
+        An observation, not a judgement: it is kept apart from labels on purpose.
+        """
+        if outcome not in ("acted", "noop", "error"):
+            raise ValueError('outcome must be "acted" or "noop"' if outcome else "outcome is required")
+        missing = [i for i in ids if self.get_decision(i) is None]
+        if missing:
+            raise ValueError(f"no decision with id {missing[0]}")
+        for i in ids:
+            self._db.execute(
+                """INSERT INTO outcomes (decision_id, outcome, ts, source) VALUES (?,?,?,?)
+                   ON CONFLICT (decision_id) DO UPDATE SET outcome=excluded.outcome, ts=excluded.ts, source=excluded.source""",
+                (i, outcome, ts, source),
+            )
+
+    def outcomes(self) -> dict[int, dict[str, Any]]:
+        return {
+            r["decision_id"]: {"outcome": r["outcome"], "ts": r["ts"], "source": r["source"]}
+            for r in self._db.execute("SELECT decision_id, outcome, ts, source FROM outcomes")
+        }
 
     def log_access(self, ts: int, actor: str, kind: str, decision_id: int | None = None, layer: str | None = None) -> None:
         """Every time a trace or a layer's raw input is shown to a person or a model."""

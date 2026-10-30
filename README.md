@@ -118,6 +118,27 @@ miss estimate: 1 of 40 sampled suppressed events were wanted = 2.5% (95% CI 0.4%
 
 **What this can and cannot tell you.** `examples/bench_canary.py` checks the estimator against synthetic traffic with known labels and a perfect reviewer: the intervals contain the true rate in about 90-100% of runs, so the estimate is honest. It is also *wide*: with a true miss rate of 1-2% among suppressed events, a 2% canary gives about 8 labels in two weeks and an interval about 36 points wide; 20% gives about 59 labels and about 8 points. Rare misses need hundreds of labels to see. Treat a canary as a tripwire ("a rule just hid something wanted: look at it") rather than a precise rate, and read the per-rule view, not only the overall number. The estimate assumes the reviewer is right; a tired reviewer or an agent labelling its own wakes will be noisier.
 
+## Running an agent through the gate
+
+`wakegate run` asks the gate, starts your agent only if the answer is wake, and reports whether the run found anything to do. That second part is what tells you what the gate is worth:
+
+```bash
+wakegate run --source inbox --key main --probe 'ls inbox | md5sum' \
+             --noop-match HEARTBEAT_OK --timeout 300 -- ./agent.sh
+```
+
+The probe is a cheap check of what changed; its output is the event data, so an unchanged inbox is a duplicate and the agent is not started. When it does run, it gets `WAKEGATE_DECISION_ID`, `WAKEGATE_EVENT` (when small) and `WAKEGATE_EVENT_FILE` (the decision, the event and any batched events) in its environment, and `--stdin-event` also writes that JSON to its stdin. The event comes from outside: treat it as data.
+
+Tell wakegate what an empty run looks like with `--noop-match REGEX` (searched in stdout), `--noop-empty` or `--noop-exit CODE`. Without one of these no outcome is recorded, because calling every run a success would teach the wrong thing. The wrapper exits with the command's own exit code (124 on timeout), or `--skipped-exit` (default 0) when the gate said skip or batch.
+
+Outcomes also come from `wakegate outcome noop 12 13` and the `wakegate_outcome` MCP tool, for an agent that reports on itself. `wakegate report` then shows what share of wakes found nothing to do. In `--shadow` mode the command always runs, and the report checks the gate's verdicts against what happened:
+
+```
+shadow check: 98 of 140 avoidable wakes have an outcome: 91 noop (confirmed avoidable), 7 acted; 7.1% would have been lost (95% CI 3.5% to 14.0%)
+```
+
+(Illustrative numbers.) This needs no labelling: the runs happened, so each one has an outcome.
+
 ## Choosing and ordering layers
 
 By default the layers are derived from the other keys. An optional `layers:` section orders them and sets a mode per layer:
@@ -165,6 +186,7 @@ wakegate mcp --config wakegate.yaml --db .wakegate/state.db
 | `wakegate_inspect` | The trace of one decision, and with `layer` the raw event that layer saw (untrusted, capped, logged) | no (writes the access log) |
 | `wakegate_log` | Recent decisions with ids, verdicts and reasons | yes |
 | `wakegate_label` | Record `wanted` / `unwanted` for a decision id (canaries and review samples feed the miss estimate) | no |
+| `wakegate_outcome` | Report that a wake `acted` or found nothing (`noop`), for one or more decision ids | no |
 | `wakegate_report` | What the rules decided, wakes shadow mode would have avoided, label counts, miss estimate with interval and per-rule breakdown | yes |
 
 **What MCP can and cannot do here.** MCP is pull-based: the server cannot wake an agent that is not running. It is useful to an agent that is already awake (call `wakegate_catchup` / `wakegate_flush` to learn what happened while it was away) and to tools or other agents that want a verdict on an event. The thing that actually decides whether to start the agent is still the `check` exit code in your scheduler or heartbeat script. Both use the same database, so they agree.
@@ -189,6 +211,7 @@ Stratified sampling (per-rule quotas), a labelling UI, adaptive polling schedule
 ## Known limits
 
 - A duplicate is skipped even if it matches a bypass rule or an exempt rule; repeated identical critical alerts will not re-wake. Change the payload (for example a counter) if you want repeats.
+- `wakegate run` records an `acted` for the event that woke the run only, not for batched events it was shown with, because it cannot tell which one caused the work. A `noop` covers all of them.
 - `poll` is a single request. Scheduling is yours (cron, a timer); respect the returned `pollIntervalHint`.
 - A first-ever event for a key always counts as a change.
 

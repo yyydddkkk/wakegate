@@ -25,11 +25,11 @@ def run_session(yaml, body):
     return asyncio.run(main())
 
 
-def test_exposes_the_eight_tools_read_only_ones_annotated():
+def test_exposes_the_nine_tools_read_only_ones_annotated():
     async def body(call, client):
         tools = (await client.list_tools()).tools
         assert sorted(t.name for t in tools) == [
-            "wakegate_catchup", "wakegate_check", "wakegate_flush", "wakegate_inspect", "wakegate_label", "wakegate_log", "wakegate_report", "wakegate_rules",
+            "wakegate_catchup", "wakegate_check", "wakegate_flush", "wakegate_inspect", "wakegate_label", "wakegate_log", "wakegate_outcome", "wakegate_report", "wakegate_rules",
         ]
         ro = {t.name: t.annotations.read_only_hint for t in tools}
         assert ro["wakegate_catchup"] is True and ro["wakegate_log"] is True and ro["wakegate_rules"] is True

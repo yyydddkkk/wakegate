@@ -19,6 +19,20 @@
     "decision_id": {
       "type": "integer"
     },
+    "outcome": {
+      "description": "What the wake produced, reported by whoever ran the agent. Null until reported.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object", "required": ["outcome", "ts", "source"], "additionalProperties": false,
+          "properties": {
+            "outcome": {"enum": ["acted", "noop", "error"]},
+            "ts": {"type": "integer"},
+            "source": {"type": "string"}
+          }
+        }
+      ]
+    },
     "synthesized": {
       "type": "boolean",
       "description": "True when the decision predates traces: layers is empty and only the result is known."

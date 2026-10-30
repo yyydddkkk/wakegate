@@ -19,6 +19,7 @@ def build_trace(store: Store, decision_id: int) -> dict[str, Any]:
     if d is None:
         raise ValueError(f"no decision with id {decision_id}")
     decided_by, rows = store.get_layer_runs(decision_id)
+    outcome = store.outcomes().get(decision_id)
 
     layers = [
         {
@@ -46,6 +47,8 @@ def build_trace(store: Store, decision_id: int) -> dict[str, Any]:
         "result": {"verdict": d.verdict, "decided_by": decided_by, "delivered": d.action, "mode": d.mode, "reason": d.reason},
         # Decisions made before traces existed have no layer rows; only the summary above is known.
         "synthesized": not rows,
+        # What the wake produced, if whoever ran the agent reported it.
+        "outcome": None if outcome is None else {"outcome": outcome["outcome"], "ts": outcome["ts"], "source": outcome["source"]},
     }
 
 

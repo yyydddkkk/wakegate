@@ -6,7 +6,7 @@ Decisions taken on the first draft:
 
 - A shadow layer's counterfactual is **marginal**: it does not model its effect on cooldown and budget state. Reports say so.
 - Classifiers **may only skip or defer** in this version. The pipeline treats a classifier that returns `wake` or `batch` as broken and fails open.
-- wakegate **will ship a wrapper**, `wakegate run -- <command>`, that wakes, runs the agent command and reports `acted` or `noop` (with a `--noop-match` pattern), to solve "who reports outcomes". It comes with the outcomes step.
+- wakegate **ships a wrapper**, `wakegate run -- <command>`, that asks the gate, runs the agent command only on a wake and reports `acted` or `noop`, to solve "who reports outcomes". **Implemented** together with the outcomes table, `wakegate outcome`, the `wakegate_outcome` MCP tool and an outcome summary in `report`. Details under *The wrapper* below.
 
 Implementation notes for 3a: the registry is in-process (`register_layer_type`); entry-point discovery arrives with 4a. Because PyYAML follows YAML 1.1, configs are now parsed with a YAML 1.2 core-schema loader, so `mode: off`, `eq: on` and an unquoted `22:00` mean what they look like.
 
@@ -167,10 +167,10 @@ After the agent handles a wake, whoever ran it reports one of two things:
 - `noop`: the run found nothing to do ("HEARTBEAT_OK", "no changes", an empty reply).
 
 ```
-wakegate outcome <decision-id> acted|noop [--source agent]
+wakegate outcome acted|noop <decision-id> [<decision-id> ...] [--source agent]
 ```
 
-and the MCP tool `wakegate_outcome`. A harness can call it with one line after each run; an agent can call it on itself. For batched events delivered with a wake, the same call accepts several ids.
+and the MCP tool `wakegate_outcome`. A harness can call it with one line after each run; an agent can call it on itself. Several ids can be given at once, for the batched events that came with a wake. (The argument order differs from the first draft so that ids can repeat.)
 
 A `noop` run is an **unwanted wake in the exact sense this project cares about**: it cost a model invocation and produced nothing. That is why outcomes are the right signal and why they are cheap: they come from what already happened, with no judgement call and no human.
 
@@ -178,10 +178,32 @@ A `noop` run is an **unwanted wake in the exact sense this project cares about**
 
 ```sql
 CREATE TABLE outcomes (
-  decision_id INTEGER PRIMARY KEY, outcome TEXT NOT NULL,   -- acted | noop
+  decision_id INTEGER PRIMARY KEY, outcome TEXT NOT NULL,   -- acted | noop | error
   ts INTEGER NOT NULL, source TEXT NOT NULL                 -- agent | harness | human
 );
 ```
+
+`error` is written only by the wrapper, when the command failed, timed out or could not start. It says nothing about whether the wake was worth it, so it is excluded from every rate.
+
+## The wrapper
+
+```
+wakegate run [event] [outcome rule] [--timeout S] [--skipped-exit N] [--stdin-event] -- <command> [args...]
+```
+
+1. **The event** comes from `--event JSON`, or `--source`/`--key` with `--data` (JSON or plain text) and `--severity`, or JSON on stdin. `--probe 'shell command'` sets the event data from the output of a cheap check, which is the usual heartbeat shape: *probe what changed, ask the gate, wake the agent only if it changed*. If the probe itself fails the event is made unique, so the agent still runs: a broken check should cost a wake, not hide one.
+2. **The gate decides.** On `skip` or `batch` the command is not run and the wrapper exits with `--skipped-exit` (default 0, because a skipped wake is not a failure for cron).
+3. **On a wake** the command is run directly (no shell) with `WAKEGATE_DECISION_ID`, `WAKEGATE_SOURCE`, `WAKEGATE_KEY`, `WAKEGATE_BATCH_COUNT`, `WAKEGATE_EVENT_FILE` (a temporary file holding the decision, event and batched events, removed afterwards) and, when small, `WAKEGATE_EVENT`. `--stdin-event` also writes that JSON to the command's stdin. The event content is external data: the command must treat it as such.
+4. **The outcome** is classified from the run. With no rule given nothing is recorded (recording `acted` for everything would teach the wrong thing), and a message says so:
+   - `--noop-exit CODE`: that exit code means nothing to do.
+   - `--noop-empty`: empty stdout means nothing to do.
+   - `--noop-match REGEX`: the regex is searched in the last 256 KB of stdout (output still passes through).
+   - exit code non-zero otherwise: `error`. A timeout kills the command, exits 124 and records `error`.
+   - a run that matches no noop rule is `acted`.
+5. **Batch.** A `noop` is recorded for every event of the batch the run was shown, because the agent saw all of them and did nothing. An `acted` is recorded only for the event that woke the run: we cannot tell which of the batch caused the work.
+6. **Exit code**: the command's own, or `--skipped-exit` when it was not run. The wrapper's messages go to stderr.
+
+With `--shadow` the command always runs, and the outcomes become the ground truth for what shadow mode said: `report` prints how many of the wakes enforcing would have avoided produced nothing (`noop`, correctly avoidable) and how many produced something (`acted`, would have been lost), with an interval.
 
 Outcomes are separate from labels on purpose. A label says "this event deserved a wake" and is a judgement; an outcome says "this wake produced something" and is an observation. They agree often and not always (an agent can act on something that was not worth the wake, or correctly do nothing about something worth knowing). Reports show both and never merge them silently.
 
@@ -234,7 +256,7 @@ Each step ships on its own and keeps the golden tests green.
 1. **3a. Modes in the pipeline and `layers:` config.** *Done.* Shadow layers do not affect the cascade; ordering and validation as above; no change when `layers:` is absent (the golden tests still pass). The funnel marks shadow layers and counts what they would have skipped.
 2. **3b. Layer-attributed canary and `review --layer`.** *Done.* `canary.layers: {name: rate}` overrides the global rate for events that layer skipped (the deciding layer is stored per decision, `decision_meta.decided_by`). Because layers can be sampled at different rates, the overall estimate is **stratified by layer** and weighted by how much each layer suppressed, instead of pooling the samples; a layer with no labelled sample is reported as uncovered, not extrapolated. One sampled layer still gives the Wilson interval; several use a normal approximation to the stratified estimator with a smoothed variance. `report` has a `byLayer` section next to `byRule`.
 3. **4a. Plugin interface.** `create`, `observe`, `params_schema`, entry-point registry, `layer_state`.
-4. **C. Outcomes.** `outcomes` table, `wakegate outcome`, `wakegate_outcome`, outcome counts in the report and funnel.
+4. **C. Outcomes.** *Done.* `outcomes` table, `wakegate outcome`, `wakegate_outcome`, `wakegate run`, outcome summary and the shadow check in `report`, `outcome` field in the trace.
 5. **3c. Shadow evaluation report.** Prequential scoring, intervals, advisory promotion check.
 6. **4c. `wakegate suggest`.** The baseline.
 7. **4d. Naive Bayes layer** in shadow, compared with 6 on real data.
@@ -244,8 +266,8 @@ Steps 1 to 5 are useful even if the learned layer is abandoned: they give any fu
 # Open questions
 
 1. ~~Marginal counterfactual.~~ Accepted.
-2. **The wrapper's contract.** Decided to build it (see above). Still to settle: how `acted` and `noop` are told apart for a command that always prints something (`--noop-match`, an exit code, an empty stdout).
-3. **Outcome semantics for agents that always reply.** An agent that always writes a status line never produces `noop`. The convention (for example, an empty reply or a fixed phrase means `noop`) has to be set by the user. Provide a `--noop-match` pattern for the wrapper.
+2. ~~The wrapper's contract.~~ Built; see *The wrapper*.
+3. ~~Outcome semantics for agents that always reply.~~ Handled by `--noop-match`, `--noop-empty` and `--noop-exit`; nothing is recorded when none is given.
 4. **Defaults** (`min_examples`, `skip_below`, `max_false_skip`, `min_outcomes`, canary floor of 2%) are guesses to be tuned on real data.
 5. **Timeouts** for slow layers are deferred. Layers needing network access must apply their own client timeouts and fail open; a per-layer wall-clock limit would need a worker thread, and SQLite handles are thread-bound.
 6. ~~Classifiers may only skip or defer.~~ Accepted for v1.

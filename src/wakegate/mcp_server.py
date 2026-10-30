@@ -137,6 +137,27 @@ def create_server(config: Config, store: Store) -> MCPServer:
         return _json({"id": id, "label": label, "countsTowardMissEstimate": sample})
 
     @server.tool(
+        name="wakegate_outcome",
+        title="Report what a wake produced",
+        description=(
+            "After handling a wake, report whether it produced anything: `acted` (you did something) or `noop` "
+            "(nothing to do). Pass the decision id of the wake, and the ids of any batched events you were shown with it "
+            "if the answer is noop. This is an observation, not a judgement of whether the event deserved a wake; "
+            "use wakegate_label for that. It is what lets the gate learn which wakes are wasted."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False),
+        structured_output=False,
+    )
+    async def wakegate_outcome(
+        outcome: Literal["acted", "noop"],
+        ids: Annotated[list[int], Field(min_length=1, max_length=100, description="Decision ids.")],
+        source: Annotated[str, Field(description="Who is reporting.")] = "agent",
+    ) -> str:
+        with _expected():
+            store.set_outcome(ids, outcome, now_ms(), source)
+        return _json({"outcome": outcome, "ids": ids})
+
+    @server.tool(
         name="wakegate_report",
         title="How well are the rules doing",
         description=(

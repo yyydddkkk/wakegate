@@ -214,6 +214,39 @@ def report(store: Store, since_ms: int, cost_per_wake: float | None = None, min_
         ),
         key=lambda x: (-x["wanted"], -x["suppressed"]),
     )
+    outs = store.outcomes()
+    delivered_wakes = [r for r in rows if r.action == "wake"]
+    counts = {"acted": 0, "noop": 0, "error": 0}
+    for r in delivered_wakes:
+        o = outs.get(r.id)
+        if o:
+            counts[o["outcome"]] += 1
+    judged = counts["acted"] + counts["noop"]
+    outcomes_summary = {
+        **counts,
+        "wakesDelivered": len(delivered_wakes),
+        "wakesWithOutcome": sum(counts.values()),
+        # Of the wakes that ended acted or noop, the share that found nothing to do.
+        "noopShare": counts["noop"] / judged if judged else None,
+    }
+    # Shadow mode ground truth: the wakes enforcing would have avoided all happened, so each has an outcome.
+    avoidable = [r for r in rows if r.mode == "shadow" and r.verdict != "wake"]
+    av = {"noop": 0, "acted": 0, "error": 0}
+    for r in avoidable:
+        o = outs.get(r.id)
+        if o:
+            av[o["outcome"]] += 1
+    av_judged = av["noop"] + av["acted"]
+    avoidance_check = None
+    if avoidable:
+        lo, hi = wilson(av["acted"], av_judged)
+        avoidance_check = {
+            "avoidable": len(avoidable), "withOutcome": sum(av.values()), **av,
+            # Wakes enforcing would have dropped that turned out to produce something.
+            "wouldHaveLostRate": av["acted"] / av_judged if av_judged else None,
+            "ci95": [lo, hi] if av_judged else None,
+        }
+
     funnel = []
     for f in store.funnel_rows(since_ms):
         decided = (f["skip"] or 0) + (f["wake"] or 0) + (f["batch"] or 0)
@@ -242,6 +275,8 @@ def report(store: Store, since_ms: int, cost_per_wake: float | None = None, min_
         "events": len(rows),
         "funnel": funnel,
         "untracedDecisions": untraced,
+        "outcomes": outcomes_summary,
+        "avoidanceCheck": avoidance_check,
         "accessLog": store.access_counts_since(since_ms),
         "verdicts": verdicts,
         "byMode": by_mode,

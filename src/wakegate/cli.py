@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ from .mcp_server import serve_stdio
 from .poll import poll_url
 from .queries import brief, catchup, parse_since, report, review, rules_status
 from .replay import read_events, replay
+from .runner import NoopRules, run_command
 from .store import Store
 from .trace import build_trace, format_trace, layer_input, trace_line
 from .timeutil import iso, now_ms
@@ -93,6 +96,27 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("poll", "one conditional GET, then check the result")
     p.add_argument("url")
     p.add_argument("--source")
+    p = add("run", "ask the gate; if it says wake, run a command and report whether it found anything to do")
+    g = p.add_argument_group("the event (one of: --event, --source/--key, or JSON on stdin)")
+    g.add_argument("--event", help="the full event as a JSON string")
+    g.add_argument("--source")
+    g.add_argument("--key")
+    g.add_argument("--data", help="JSON, or plain text")
+    g.add_argument("--severity")
+    g.add_argument("--probe", help="a shell command whose output becomes the event data: a cheap check of what changed")
+    g = p.add_argument_group("what counts as an empty run (without one of these no outcome is recorded)")
+    g.add_argument("--noop-match", metavar="REGEX", help="a regex searched in the command's stdout")
+    g.add_argument("--noop-empty", action="store_true", help="empty stdout means nothing to do")
+    g.add_argument("--noop-exit", type=int, metavar="CODE", help="this exit code means nothing to do")
+    p.add_argument("--timeout", type=float, help="seconds; the command is stopped and the outcome is error (exit 124)")
+    p.add_argument("--skipped-exit", type=int, default=0, help="exit code when the gate says skip or batch (default 0)")
+    p.add_argument("--stdin-event", action="store_true", help="write the decision, event and batch as JSON to the command's stdin")
+    p.add_argument("--quiet", action="store_true", help="no wakegate messages on stderr")
+    p.add_argument("command", nargs=argparse.REMAINDER, help="-- the agent command and its arguments")
+    p = add("outcome", "record what a wake produced (acted or noop) for one or more decisions")
+    p.add_argument("outcome", choices=["acted", "noop"])
+    p.add_argument("ids", type=int, nargs="+", metavar="id")
+    p.add_argument("--source", default="agent", help="who reports it (default agent)")
     add("flush", "print and clear the batched events as JSON")
     p = add("catchup", "what changed since then (per key)")
     p.add_argument("--since", default="24h")
@@ -134,6 +158,72 @@ def _load(args: argparse.Namespace) -> Config:
     return cfg.with_shadow() if args.shadow else cfg
 
 
+def _probe_data(command: str) -> Any:
+    """Output of the probe command as event data. If the probe itself fails the event is made unique,
+    so the agent still runs: a broken check should cost a wake, not hide one."""
+    try:
+        res = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60)  # noqa: S602 - the user's own command
+    except subprocess.TimeoutExpired:
+        return {"probeFailed": "timeout", "at": now_ms()}
+    if res.returncode != 0:
+        return {"probeFailed": res.returncode, "at": now_ms()}
+    out = res.stdout.strip()[:65536]
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        return out
+
+
+def _event_for_run(args: argparse.Namespace) -> tuple[WakeEvent, bool]:
+    """The event, and whether stdin was consumed to get it."""
+    if args.event is not None:
+        base = json.loads(args.event)
+        stdin_used = False
+    elif args.source and args.key:
+        base = {"source": args.source, "key": args.key}
+        stdin_used = False
+    elif sys.stdin.isatty():
+        raise CliError("give the event with --event, with --source and --key, or as JSON on stdin")
+    else:
+        base = json.loads(sys.stdin.read())
+        stdin_used = True
+    if not isinstance(base, dict):
+        raise CliError("event must be a JSON object")
+    if args.severity:
+        base["severity"] = args.severity
+    if args.data is not None:
+        try:
+            base["data"] = json.loads(args.data)
+        except json.JSONDecodeError:
+            base["data"] = args.data
+    if args.probe:
+        base["data"] = _probe_data(args.probe)
+    return WakeEvent.from_dict(base), stdin_used
+
+
+def _run_wrapped(args: argparse.Namespace, store: Store) -> int:
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not command:
+        raise CliError("no command given: wakegate run [options] -- <command> [args...]")
+    try:
+        match = re.compile(args.noop_match) if args.noop_match else None
+    except re.error as e:
+        raise CliError(f"--noop-match is not a valid regex: {e}") from None
+    try:
+        event, stdin_used = _event_for_run(args)
+    except json.JSONDecodeError:
+        raise CliError("event is not valid JSON") from None
+    gate = Gate(_load(args), store)
+    result = run_command(
+        gate, store, event, command,
+        rules=NoopRules(match=match, empty=args.noop_empty, exit_code=args.noop_exit),
+        timeout=args.timeout, skipped_exit=args.skipped_exit,
+        stdin_event=args.stdin_event, stdin_inherit=not stdin_used,
+        say=(lambda s: None) if args.quiet else (lambda s: print(s, file=sys.stderr)),
+    )
+    return result.exit_code
+
+
 def _print_report(r: dict[str, Any]) -> None:
     pct = lambda x: f"{x * 100:.1f}%"  # noqa: E731
     print(f"since {r['since']}: {r['events']} events")
@@ -153,6 +243,16 @@ def _print_report(r: dict[str, Any]) -> None:
         print(f"{r['untracedDecisions']} decisions in this window were made before traces existed and are not in the table above.")
     if r["accessLog"]:
         print("inspections: " + ", ".join(f"{k} {n}" for k, n in r["accessLog"].items()))
+    o = r["outcomes"]
+    if o["wakesWithOutcome"]:
+        share = f" ({o['noopShare'] * 100:.0f}% of the judged wakes found nothing to do)" if o["noopShare"] is not None else ""
+        print(f"outcomes: {o['wakesWithOutcome']} of {o['wakesDelivered']} delivered wakes reported: noop {o['noop']}, acted {o['acted']}, error {o['error']}{share}")
+    ac = r["avoidanceCheck"]
+    if ac and ac["withOutcome"]:
+        lost = ""
+        if ac["wouldHaveLostRate"] is not None:
+            lost = f"; {ac['wouldHaveLostRate'] * 100:.1f}% would have been lost (95% CI {ac['ci95'][0] * 100:.1f}% to {ac['ci95'][1] * 100:.1f}%)"
+        print(f"shadow check: {ac['withOutcome']} of {ac['avoidable']} avoidable wakes have an outcome: {ac['noop']} noop (confirmed avoidable), {ac['acted']} acted{lost}")
     if m["shadow"]:
         saving = f" (about {r['estimatedSaving']:.2f} at the given cost)" if r["estimatedSaving"] is not None else ""
         print(f"shadow: enforcing would have avoided {r['wakesAvoidable']} wakes{saving}")
@@ -233,6 +333,12 @@ def _run(args: argparse.Namespace) -> int:
             d = gate.decide(event)
             print(_dump(d.to_dict()))
             return EXIT[d.action]
+        if cmd == "run":
+            return _run_wrapped(args, store)
+        if cmd == "outcome":
+            store.set_outcome(args.ids, args.outcome, now_ms(), args.source)
+            print(_dump({"outcome": args.outcome, "ids": args.ids}))
+            return 0
         if cmd == "flush":
             print(_dump([brief(r) for r in store.take_pending()], 2))
         elif cmd == "catchup":
