@@ -93,6 +93,51 @@ def _round(x: float) -> int:
     return math.floor(x + 0.5)  # like JavaScript's Math.round
 
 
+def _estimate(per_layer: dict[str, dict[str, int]]) -> dict[str, Any] | None:
+    """The share of suppressed events that were wanted.
+
+    Each layer is sampled uniformly (a canary, or a review draw), but different layers can be
+    sampled at different rates, so pooling the samples would over-weight the heavily sampled
+    layers. The estimate is therefore stratified by the layer that suppressed the event, each
+    layer weighted by how many events it suppressed. A layer with no labelled sample is left out
+    and listed under `uncovered`: its rate is not extrapolated from the others.
+
+    One sampled layer: the Wilson interval for its sample. Several: a normal approximation to the
+    stratified estimator, with a smoothed variance so a sample of all zeros is not read as certainty.
+    """
+    strata = {name: b for name, b in per_layer.items() if b["n"] > 0}
+    if not strata:
+        return None
+    n_total = sum(b["n"] for b in strata.values())
+    wanted_total = sum(b["wanted"] for b in strata.values())
+    uncovered = sum(b["suppressed"] for name, b in per_layer.items() if name not in strata)
+
+    bounds = {name: wilson(b["wanted"], b["n"]) for name, b in strata.items()}
+    # Events not already delivered as canaries: the ones that would really have been lost.
+    lo_events = sum(_round(bounds[name][0] * b["undelivered"]) for name, b in strata.items())
+    hi_events = sum(_round(bounds[name][1] * b["undelivered"]) for name, b in strata.items())
+
+    if len(strata) == 1:
+        (name, b), = strata.items()
+        rate, ci, method = b["wanted"] / b["n"], list(bounds[name]), "pooled"
+    else:
+        pop = sum(b["suppressed"] for b in strata.values())
+        rate = sum(b["suppressed"] / pop * (b["wanted"] / b["n"]) for b in strata.values())
+        var = 0.0
+        for b in strata.values():
+            p = (b["wanted"] + 0.5) / (b["n"] + 1)
+            var += (b["suppressed"] / pop) ** 2 * p * (1 - p) / b["n"]
+        half = 1.96 * math.sqrt(var)
+        ci, method = [max(0.0, rate - half), min(1.0, rate + half)], "stratified"
+    return {
+        "sampleSize": n_total, "wanted": wanted_total, "rate": rate, "ci95": ci,
+        "method": method, "layers": sorted(strata), "uncoveredSuppressed": uncovered,
+        # Interval times the suppressed events not already delivered as canaries, summed over the layers sampled.
+        # In shadow mode: events enforcing would have missed.
+        "expectedMissedEvents": [lo_events, hi_events],
+    }
+
+
 def report(store: Store, since_ms: int, cost_per_wake: float | None = None, min_sample: int = 30) -> dict[str, Any]:
     """What the rules decided, and an estimate of how many suppressed events were wanted."""
     rows = store.decisions_since(since_ms)
@@ -102,6 +147,7 @@ def report(store: Store, since_ms: int, cost_per_wake: float | None = None, min_
     by_mode = {"enforce": 0, "shadow": 0, "canary": 0}
     reasons: dict[tuple[str, str], int] = {}
     per_rule: dict[str, dict[str, int]] = {}
+    per_layer: dict[str, dict[str, int]] = {}
     suppressed = suppressed_undelivered = shadow_avoidable = unwanted_wakes = unlabeled = 0
     sample_n = sample_wanted = 0
 
@@ -118,15 +164,21 @@ def report(store: Store, since_ms: int, cost_per_wake: float | None = None, min_
                 suppressed_undelivered += 1
             is_sample = r.mode == "canary" or r.id in queued
             b = per_rule.setdefault(r.rule or r.reason, {"suppressed": 0, "n": 0, "wanted": 0})
+            lb = per_layer.setdefault(r.decided_by or "unknown", {"suppressed": 0, "undelivered": 0, "n": 0, "wanted": 0})
             b["suppressed"] += 1
+            lb["suppressed"] += 1
+            if r.mode != "canary":
+                lb["undelivered"] += 1
             if is_sample and not lab:
                 unlabeled += 1
             if is_sample and lab and lab["sample"]:
                 sample_n += 1
                 b["n"] += 1
+                lb["n"] += 1
                 if lab["label"] == "wanted":
                     sample_wanted += 1
                     b["wanted"] += 1
+                    lb["wanted"] += 1
         if lab and lab["label"] == "unwanted" and r.verdict == "wake":
             unwanted_wakes += 1
 
@@ -137,15 +189,7 @@ def report(store: Store, since_ms: int, cost_per_wake: float | None = None, min_
             labelled["total"] += 1
             labelled[lab["label"]] += 1
 
-    miss = None
-    if sample_n > 0:
-        lo, hi = wilson(sample_wanted, sample_n)
-        miss = {
-            "sampleSize": sample_n, "wanted": sample_wanted, "rate": sample_wanted / sample_n, "ci95": [lo, hi],
-            # Rate interval times the rule-suppressed events not already delivered as canaries.
-            # In shadow mode: events enforcing would have missed.
-            "expectedMissedEvents": [_round(lo * suppressed_undelivered), _round(hi * suppressed_undelivered)],
-        }
+    miss = _estimate(per_layer)
 
     advice: list[str] = []
     if by_mode["shadow"] > 0:
@@ -186,6 +230,13 @@ def report(store: Store, since_ms: int, cost_per_wake: float | None = None, min_
         })
     untraced = store.count_untraced_since(since_ms)
 
+    by_layer = sorted(
+        (
+            {"layer": name, "suppressed": b["suppressed"], "sampleSize": b["n"], "wanted": b["wanted"], "ci95": list(wilson(b["wanted"], b["n"]))}
+            for name, b in per_layer.items()
+        ),
+        key=lambda x: (-x["wanted"], -x["suppressed"]),
+    )
     return {
         "since": iso(since_ms),
         "events": len(rows),
@@ -206,11 +257,13 @@ def report(store: Store, since_ms: int, cost_per_wake: float | None = None, min_
         "unlabeledSamples": unlabeled,
         "missEstimate": miss,
         "byRule": by_rule,
+        "byLayer": by_layer,
         "advice": advice,
     }
 
 
-def review(store: Store, since_ms: int, sample: int | None = None, seed: int | None = None, now: int | None = None) -> list[dict[str, Any]]:
+def review(store: Store, since_ms: int, sample: int | None = None, seed: int | None = None, now: int | None = None,
+           layer: str | None = None) -> list[dict[str, Any]]:
     """Draw a uniform random sample of rule-suppressed events for a person to label, and return
     everything still waiting for a label: the new draw, earlier draws and unlabeled canaries."""
     labels = store.labels()
@@ -218,7 +271,11 @@ def review(store: Store, since_ms: int, sample: int | None = None, seed: int | N
     rows = store.decisions_since(since_ms)
 
     if sample and sample > 0:
-        pool = [r for r in rows if _is_suppressed(r) and r.mode != "canary" and r.id not in queued and r.id not in labels]
+        pool = [
+            r for r in rows
+            if _is_suppressed(r) and r.mode != "canary" and r.id not in queued and r.id not in labels
+            and (layer is None or r.decided_by == layer)
+        ]
         rand = seeded_random(seed if seed is not None else now_ms())
         for i in range(len(pool) - 1, 0, -1):
             j = math.floor(rand() * (i + 1))

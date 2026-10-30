@@ -1,6 +1,6 @@
 # Per-layer modes, a plugin interface, and a first learned layer
 
-Status: steps 3 and 4 of [layers-and-trace.md](layers-and-trace.md). **Step 3a is implemented** (layer modes in the pipeline, the `layers:` section with validation, the in-process type registry, shadow layers in the funnel). Everything else here is still proposal. Written against the code at `6c9bb07`.
+Status: steps 3 and 4 of [layers-and-trace.md](layers-and-trace.md). **Steps 3a and 3b are implemented** (layer modes in the pipeline, the `layers:` section with validation, the in-process type registry, shadow layers in the funnel; per-layer canary rates, estimates stratified by layer, `review --layer`). Everything else here is still proposal. Written against the code at `6c9bb07`.
 
 Decisions taken on the first draft:
 
@@ -232,7 +232,7 @@ It can check the machinery: that a shadow layer leaves the verdict untouched, th
 Each step ships on its own and keeps the golden tests green.
 
 1. **3a. Modes in the pipeline and `layers:` config.** *Done.* Shadow layers do not affect the cascade; ordering and validation as above; no change when `layers:` is absent (the golden tests still pass). The funnel marks shadow layers and counts what they would have skipped.
-2. **3b. Layer-attributed canary and `review --layer`.** Per-layer samples and miss estimates.
+2. **3b. Layer-attributed canary and `review --layer`.** *Done.* `canary.layers: {name: rate}` overrides the global rate for events that layer skipped (the deciding layer is stored per decision, `decision_meta.decided_by`). Because layers can be sampled at different rates, the overall estimate is **stratified by layer** and weighted by how much each layer suppressed, instead of pooling the samples; a layer with no labelled sample is reported as uncovered, not extrapolated. One sampled layer still gives the Wilson interval; several use a normal approximation to the stratified estimator with a smoothed variance. `report` has a `byLayer` section next to `byRule`.
 3. **4a. Plugin interface.** `create`, `observe`, `params_schema`, entry-point registry, `layer_state`.
 4. **C. Outcomes.** `outcomes` table, `wakegate outcome`, `wakegate_outcome`, outcome counts in the report and funnel.
 5. **3c. Shadow evaluation report.** Prequential scoring, intervals, advisory promotion check.

@@ -117,6 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--since", default="7d")
     p.add_argument("--sample", type=int)
     p.add_argument("--seed", type=int)
+    p.add_argument("--layer", help="draw only from events this layer suppressed (sample a specific layer)")
     p.add_argument("--json", action="store_true")
     p = add("label", 'record whether an event was worth waking for ("wanted" = it should have woken the agent)')
     p.add_argument("id", type=int)
@@ -165,6 +166,14 @@ def _print_report(r: dict[str, Any]) -> None:
             f"miss estimate: {est['wanted']} of {est['sampleSize']} sampled suppressed events were wanted = {pct(est['rate'])} "
             f"(95% CI {pct(lo)} to {pct(hi)}), i.e. roughly {est['expectedMissedEvents'][0]} to {est['expectedMissedEvents'][1]} missed events in this window"
         )
+        if est["method"] == "stratified":
+            print(f"  (stratified by the layer that suppressed the event; covers {', '.join(est['layers'])}"
+                  + (f"; {est['uncoveredSuppressed']} suppressed events in unsampled layers are not estimated" if est["uncoveredSuppressed"] else "") + ")")
+        elif est["uncoveredSuppressed"]:
+            print(f"  ({est['uncoveredSuppressed']} suppressed events in layers with no labelled sample are not estimated)")
+        for b in [x for x in r["byLayer"] if x["sampleSize"] > 0][:6]:
+            blo, bhi = b["ci95"]
+            print(f"  layer {b['layer']}: {b['wanted']} of {b['sampleSize']} sampled were wanted (95% CI {pct(blo)} to {pct(bhi)}); {b['suppressed']} suppressed")
         for b in [x for x in r["byRule"] if x["sampleSize"] > 0][:6]:
             blo, bhi = b["ci95"]
             print(f"  rule {b['rule']}: {b['wanted']} of {b['sampleSize']} sampled were wanted (95% CI {pct(blo)} to {pct(bhi)}); {b['suppressed']} suppressed")
@@ -251,13 +260,13 @@ def _run(args: argparse.Namespace) -> int:
             r = report(store, parse_since(args.since), cost_per_wake=args.cost_per_wake or None)
             print(_dump(r, 2)) if args.json else _print_report(r)
         elif cmd == "review":
-            items = review(store, parse_since(args.since), sample=args.sample, seed=args.seed)
+            items = review(store, parse_since(args.since), sample=args.sample, seed=args.seed, layer=args.layer)
             if args.json:
                 print(_dump(items, 2))
             else:
                 print(f'{len(items)} event(s) waiting for a label. For each: wakegate label <id> wanted|unwanted\n("wanted" = it should have woken the agent)\n')
                 for b in items:
-                    print(f"#{b['id']}  {b['ts']}  {b['source']}/{b['key']}  {b['verdict']}:{b['reason']}\n      {_dump(b['event'].get('data'))[:200]}")
+                    print(f"#{b['id']}  {b['ts']}  {b['source']}/{b['key']}  {b['verdict']}:{b['reason']}  [{b['decidedBy'] or '-'}]\n      {_dump(b['event'].get('data'))[:200]}")
         elif cmd == "label":
             sample = store.set_label(args.id, args.label, args.note, now_ms())
             print(_dump({"id": args.id, "label": args.label, "countsTowardMissEstimate": sample}))

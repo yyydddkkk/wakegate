@@ -96,13 +96,21 @@ class Config:
     mode: str = "enforce"
     #: Fraction (0-1) of would-be skips, other than duplicates, delivered as a wake so misses can be measured.
     canary_rate: float = 0.0
+    #: Per-layer canary rates that override `canary_rate` for events that layer skipped.
+    canary_layers: dict[str, float] = field(default_factory=dict)
     budget: Budget = field(default_factory=Budget)
     #: The ordered `layers:` section, or None to derive the pipeline from the other keys.
     layer_specs: tuple[LayerSpec, ...] | None = None
 
     def with_shadow(self) -> Config:
         """The same policy in shadow mode (a canary has no meaning there)."""
-        return replace(self, mode="shadow", canary_rate=0.0)
+        return replace(self, mode="shadow", canary_rate=0.0, canary_layers={})
+
+    def canary_rate_for(self, layer: str | None) -> float:
+        """The share of this layer's skips released as canaries."""
+        if layer is not None and layer in self.canary_layers:
+            return self.canary_layers[layer]
+        return self.canary_rate
 
 
 def _as_action(v: Any, where: str) -> Action:
@@ -197,8 +205,13 @@ def parse_config(text: str) -> Config:
     rate = canary.get("rate", 0)
     if not _is_number(rate) or rate < 0 or rate > 1:
         raise ValueError("canary.rate: expected a number between 0 and 1")
-    if mode == "shadow" and rate > 0:
-        raise ValueError("canary.rate has no effect in shadow mode (everything already wakes)")
+    canary_layers = canary.get("layers") or {}
+    if not isinstance(canary_layers, dict) or any(
+        not isinstance(k, str) or not _is_number(v) or v < 0 or v > 1 for k, v in canary_layers.items()
+    ):
+        raise ValueError("canary.layers: expected a mapping of layer name to a rate between 0 and 1")
+    if mode == "shadow" and (rate > 0 or any(v > 0 for v in canary_layers.values())):
+        raise ValueError("canary has no effect in shadow mode (everything already wakes)")
 
     config = Config(
         ignore_paths=tuple(ignore),
@@ -210,9 +223,14 @@ def parse_config(text: str) -> Config:
         flush_on_wake=True if raw.get("flushOnWake") is None else bool(raw["flushOnWake"]),
         mode=mode,
         canary_rate=float(rate),
+        canary_layers={k: float(v) for k, v in canary_layers.items()},
         budget=Budget(max_wakes, over, quiet, tz),
     )
     specs = _parse_layer_specs(raw.get("layers"))
+    known = set(BUILTIN_LAYERS) | {s.name for s in specs or ()}
+    for name in config.canary_layers:
+        if name not in known:
+            raise ValueError(f'canary.layers: "{name}" is not a layer in this pipeline (known: {", ".join(sorted(known))})')
     if specs is not None:
         _validate_layers(specs, config)
         config = replace(config, layer_specs=specs)
@@ -276,10 +294,10 @@ def _validate_layers(specs: tuple[LayerSpec, ...], c: Config) -> None:
         else:
             cls = layer_type(s.type)  # raises with the list of registered types
             rank = _CLASSIFIER_RANK
-            if s.mode == "enforce" and c.canary_rate < MIN_CANARY_FOR_ENFORCED_CLASSIFIER:
+            if s.mode == "enforce" and c.canary_rate_for(s.name) < MIN_CANARY_FOR_ENFORCED_CLASSIFIER:
                 raise ValueError(
                     f"{at}: a classifier in enforce mode needs a canary of at least {MIN_CANARY_FOR_ENFORCED_CLASSIFIER:.0%} "
-                    "(canary.rate), otherwise the events it skips are never seen again and it cannot be checked. "
+                    "(canary.rate, or canary.layers for this layer), otherwise the events it skips are never seen again and it cannot be checked. "
                     "Run it in shadow mode first."
                 )
             del cls
@@ -322,5 +340,6 @@ def describe_config(c: Config) -> dict[str, Any]:
         "flushOnWake": c.flush_on_wake,
         "mode": c.mode,
         "canaryRate": c.canary_rate,
+        "canaryLayers": dict(c.canary_layers),
         "budget": budget,
     }

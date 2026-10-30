@@ -64,7 +64,7 @@ class Gate:
             delivered: Action = verdict.action
             if c.mode == "shadow":
                 mode, delivered = "shadow", "wake"
-            elif is_canary_candidate(verdict.action, verdict.reason) and _canary_roll(ev, fingerprint) < c.canary_rate:
+            elif is_canary_candidate(verdict.action, verdict.reason) and _canary_roll(ev, fingerprint) < c.canary_rate_for(outcome.decided_by):
                 mode, delivered = "canary", "wake"
 
             carried = [brief(r) for r in self.store.take_pending()] if delivered == "wake" and c.flush_on_wake else []
@@ -91,7 +91,7 @@ class Gate:
         note = None
         if mode == "canary":
             note = (
-                f"Released as a canary: your rules would have skipped this ({verdict.reason}). "
+                f"Released as a canary: the {outcome.decided_by} layer would have skipped this ({verdict.reason}). "
                 f"Record whether it was worth waking for: wakegate label {id_} wanted|unwanted."
             )
         return Decision(

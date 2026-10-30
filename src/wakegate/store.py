@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS http_validators (
 """
 
 
+_SELECT = "SELECT d.*, m.decided_by AS decided_by FROM decisions d LEFT JOIN decision_meta m ON m.decision_id = d.id"
+
+
 @dataclass
 class KeyState:
     fingerprint: str
@@ -73,6 +76,8 @@ class DecisionRow:
     rule: str | None
     changed: bool
     event: dict[str, Any]
+    #: The layer whose outcome was the verdict. None for decisions made before traces existed.
+    decided_by: str | None = None
 
 
 def brief(r: DecisionRow) -> dict[str, Any]:
@@ -86,6 +91,7 @@ def brief(r: DecisionRow) -> dict[str, Any]:
         "verdict": r.verdict,
         "mode": r.mode,
         "reason": r.reason,
+        "decidedBy": r.decided_by,
         "event": r.event,
     }
 
@@ -94,7 +100,7 @@ def _row(r: sqlite3.Row) -> DecisionRow:
     return DecisionRow(
         id=r["id"], ts=r["ts"], day=r["day"], source=r["source"], key=r["key"], fingerprint=r["fingerprint"],
         action=r["action"], verdict=r["verdict"], mode=r["mode"], reason=r["reason"], rule=r["rule"],
-        changed=bool(r["changed"]), event=json.loads(r["event_json"]),
+        changed=bool(r["changed"]), event=json.loads(r["event_json"]), decided_by=r["decided_by"],
     )
 
 
@@ -213,14 +219,14 @@ class Store:
         return self._db.execute("SELECT COUNT(*) AS n FROM decisions WHERE day=? AND verdict='wake'", (day,)).fetchone()["n"]
 
     def get_decision(self, id: int) -> DecisionRow | None:
-        r = self._db.execute("SELECT * FROM decisions WHERE id=?", (id,)).fetchone()
+        r = self._db.execute(_SELECT + " WHERE d.id=?", (id,)).fetchone()
         return _row(r) if r else None
 
     def decisions_since(self, ts: int, limit: int = 10_000) -> list[DecisionRow]:
-        return [_row(r) for r in self._db.execute("SELECT * FROM decisions WHERE ts >= ? ORDER BY ts, id LIMIT ?", (ts, limit))]
+        return [_row(r) for r in self._db.execute(_SELECT + " WHERE d.ts >= ? ORDER BY d.ts, d.id LIMIT ?", (ts, limit))]
 
     def recent_decisions(self, limit: int) -> list[DecisionRow]:
-        rows = [_row(r) for r in self._db.execute("SELECT * FROM decisions ORDER BY id DESC LIMIT ?", (limit,))]
+        rows = [_row(r) for r in self._db.execute(_SELECT + " ORDER BY d.id DESC LIMIT ?", (limit,))]
         return rows[::-1]
 
     # ---- batch
@@ -233,7 +239,7 @@ class Store:
             rows = [
                 _row(r)
                 for r in self._db.execute(
-                    "SELECT d.* FROM decisions d JOIN pending p ON p.decision_id = d.id ORDER BY d.ts, d.id"
+                    "SELECT d.*, m.decided_by AS decided_by FROM decisions d JOIN pending p ON p.decision_id = d.id LEFT JOIN decision_meta m ON m.decision_id = d.id ORDER BY d.ts, d.id"
                 )
             ]
             self._db.execute("DELETE FROM pending")
