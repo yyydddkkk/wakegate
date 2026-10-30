@@ -38,8 +38,16 @@ def run_pipeline(layers: list[Layer], ctx: LayerContext) -> PipelineOutcome:
             result = LayerResult("error", False, f"error:{layer.name}", detail={"type": type(e).__name__, "message": str(e)[:200]})
         ms = (time.perf_counter() - started) * 1000
         result.cost = Cost(ms=round(ms, 3), tokens_in=result.cost.tokens_in, tokens_out=result.cost.tokens_out, usd=result.cost.usd)
-        runs.append(LayerRun(len(runs), layer.name, layer.kind, "enforce", True, result, ms))
+        shadow = layer.mode == "shadow"
+        # A classifier may only skip or defer. Anything else is a bug in the layer: fail open.
+        if layer.kind == "classifier" and result.outcome in ("wake", "batch"):
+            result = LayerResult("error", False, f"error:{layer.name}", detail={"message": f"a classifier may only skip or defer, returned {result.outcome}"}, cost=result.cost)
+        elif layer.kind == "classifier" and result.outcome == "skip":
+            result.final = True
+        runs.append(LayerRun(len(runs), layer.name, layer.kind, "shadow" if shadow else "enforce", not shadow, result, ms))
 
+        if shadow:
+            continue  # recorded, but the cascade goes on as if it had deferred
         if result.outcome == "defer":
             continue
         if result.outcome == "error":

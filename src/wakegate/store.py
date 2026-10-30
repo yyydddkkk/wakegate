@@ -193,6 +193,8 @@ class Store:
                SUM(lr.outcome = 'skip'  AND dm.decided_by = lr.layer) AS skip,
                SUM(lr.outcome = 'wake'  AND dm.decided_by = lr.layer) AS wake,
                SUM(lr.outcome = 'batch' AND dm.decided_by = lr.layer) AS batch,
+               SUM(lr.mode = 'shadow' AND d.mode <> 'shadow') AS shadow_runs,
+               SUM(lr.mode = 'shadow' AND d.mode <> 'shadow' AND lr.outcome = 'skip') AS would_skip,
                SUM(lr.duration_ms) AS ms, SUM(lr.tokens_in) AS tokens_in, SUM(lr.tokens_out) AS tokens_out, SUM(lr.cost_usd) AS usd
         FROM layer_runs lr
         JOIN decisions d ON d.id = lr.decision_id

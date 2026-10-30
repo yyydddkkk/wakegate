@@ -177,7 +177,10 @@ def report(store: Store, since_ms: int, cost_per_wake: float | None = None, min_
             "layer": f["layer"], "kind": f["kind"], "entered": f["entered"],
             "skip": f["skip"] or 0, "wake": f["wake"] or 0, "batch": f["batch"] or 0,
             # Handed on: a defer, or a wake proposal that a governor could still limit.
-            "passed": f["entered"] - decided - (f["errors"] or 0),
+            "passed": f["entered"] - decided - (f["errors"] or 0) - (f["would_skip"] or 0) if (f["shadow_runs"] or 0) else f["entered"] - decided - (f["errors"] or 0),
+            # A layer in shadow mode: what it said, which was not applied.
+            "mode": "shadow" if (f["shadow_runs"] or 0) else "enforce",
+            "wouldSkip": f["would_skip"] or 0,
             "errors": f["errors"] or 0,
             "costMs": round(f["ms"] or 0, 3), "tokensIn": f["tokens_in"], "tokensOut": f["tokens_out"], "costUsd": f["usd"],
         })

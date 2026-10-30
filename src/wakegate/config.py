@@ -5,10 +5,31 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import re
+
 import yaml
 
 from .condition import Predicate, compile_condition
 from .types import Action
+
+class _Yaml12Loader(yaml.SafeLoader):
+    """YAML 1.2 core schema scalars. PyYAML follows YAML 1.1, where `off`, `on`, `yes` and `no` are
+    booleans and `22:00` is the number 1320. In a rules file that silently changes what a condition
+    means (`eq: on` would compare with true), so only true/false are booleans and numbers are plain."""
+
+
+_Yaml12Loader.yaml_implicit_resolvers = {
+    ch: [(tag, rx) for tag, rx in resolvers if tag not in ("tag:yaml.org,2002:bool", "tag:yaml.org,2002:int", "tag:yaml.org,2002:float")]
+    for ch, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_Yaml12Loader.add_implicit_resolver("tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF"))
+_Yaml12Loader.add_implicit_resolver(
+    "tag:yaml.org,2002:int", re.compile(r"^(?:[-+]?[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+)$"), list("-+0123456789")
+)
+_Yaml12Loader.add_implicit_resolver(
+    "tag:yaml.org,2002:float", re.compile(r"^[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?$"), list("-+0123456789.")
+)
+
 
 #: Limits a rule can opt out of. A bypass rule opts out of all of them.
 EXEMPTIONS = ("cooldown", "quietHours", "budget")
@@ -24,6 +45,25 @@ class Rule:
     then: Action
     #: Limits this rule's wakes ignore (only for rules with then: wake).
     exempt: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class LayerSpec:
+    """One entry of the `layers:` section."""
+
+    name: str
+    #: None for a built-in layer; the registered type for any other.
+    type: str | None = None
+    mode: str = "enforce"
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+#: Where each kind of layer may sit: the order must not go back down.
+#: dedupe, then bypass, then rules, then classifiers, then governors.
+BUILTIN_LAYERS = {"dedupe": 0, "bypass": 1, "rules": 2, "cooldown": 4, "quiet_hours": 4, "budget": 4}
+_CLASSIFIER_RANK = 3
+#: A learned layer that skips events starves its own feedback, so enforcing one needs a canary at least this big.
+MIN_CANARY_FOR_ENFORCED_CLASSIFIER = 0.02
 
 
 @dataclass(frozen=True)
@@ -57,6 +97,8 @@ class Config:
     #: Fraction (0-1) of would-be skips, other than duplicates, delivered as a wake so misses can be measured.
     canary_rate: float = 0.0
     budget: Budget = field(default_factory=Budget)
+    #: The ordered `layers:` section, or None to derive the pipeline from the other keys.
+    layer_specs: tuple[LayerSpec, ...] | None = None
 
     def with_shadow(self) -> Config:
         """The same policy in shadow mode (a canary has no meaning there)."""
@@ -109,7 +151,7 @@ def _is_number(v: Any) -> bool:
 
 
 def parse_config(text: str) -> Config:
-    raw = yaml.safe_load(text) or {}
+    raw = yaml.load(text, Loader=_Yaml12Loader) or {}  # noqa: S506 - a SafeLoader subclass
     if not isinstance(raw, dict):
         raise ValueError("config: expected a mapping at the top level")
     if raw.get("version") not in (None, 1):
@@ -158,7 +200,7 @@ def parse_config(text: str) -> Config:
     if mode == "shadow" and rate > 0:
         raise ValueError("canary.rate has no effect in shadow mode (everything already wakes)")
 
-    return Config(
+    config = Config(
         ignore_paths=tuple(ignore),
         dedupe=True if raw.get("dedupe") is None else bool(raw["dedupe"]),
         bypass=_compile_rules(raw.get("bypass"), "bypass", "wake"),
@@ -170,6 +212,84 @@ def parse_config(text: str) -> Config:
         canary_rate=float(rate),
         budget=Budget(max_wakes, over, quiet, tz),
     )
+    specs = _parse_layer_specs(raw.get("layers"))
+    if specs is not None:
+        _validate_layers(specs, config)
+        config = replace(config, layer_specs=specs)
+    return config
+
+
+def _parse_layer_specs(raw: Any) -> tuple[LayerSpec, ...] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("layers: expected a non-empty list")
+    specs: list[LayerSpec] = []
+    for i, item in enumerate(raw):
+        at = f"layers[{i}]"
+        if isinstance(item, str):
+            item = {"name": item}
+        if not isinstance(item, dict):
+            raise ValueError(f"{at}: expected a layer name or an object with name, type, mode, params")
+        unknown = [k for k in item if k not in ("name", "type", "mode", "params")]
+        if unknown:
+            raise ValueError(f'{at}: unknown key "{unknown[0]}"')
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f'{at}: "name" is required')
+        mode = item.get("mode", "enforce")
+        if mode not in ("off", "shadow", "enforce"):
+            raise ValueError(f'{at}.mode: expected "off", "shadow" or "enforce"')
+        params = item.get("params") or {}
+        if not isinstance(params, dict):
+            raise ValueError(f"{at}.params: expected a mapping")
+        specs.append(LayerSpec(name, item.get("type"), mode, params))
+    return tuple(specs)
+
+
+def _validate_layers(specs: tuple[LayerSpec, ...], c: Config) -> None:
+    from .registry import layer_type
+
+    seen: set[str] = set()
+    rank_so_far = -1
+    for i, s in enumerate(specs):
+        at = f"layers[{i}] ({s.name})"
+        if s.name in seen:
+            raise ValueError(f'{at}: duplicate layer name "{s.name}"')
+        seen.add(s.name)
+
+        if s.type is None:
+            if s.name not in BUILTIN_LAYERS:
+                raise ValueError(f'{at}: "{s.name}" is not a built-in layer ({", ".join(BUILTIN_LAYERS)}); give it a `type` to use a registered one')
+            if s.params:
+                raise ValueError(f"{at}: built-in layers take no params; their settings are the top-level keys")
+            rank = BUILTIN_LAYERS[s.name]
+            missing = {
+                "dedupe": None if c.dedupe else "dedupe is set to false",
+                "bypass": None if c.bypass else "there are no bypass rules",
+                "cooldown": None if c.cooldown_seconds > 0 else "cooldownSeconds is not set",
+                "quiet_hours": None if c.budget.quiet_hours else "budget.quietHours is not set",
+                "budget": None if c.budget.max_wakes_per_day is not None else "budget.maxWakesPerDay is not set",
+            }.get(s.name)
+            if missing and s.mode != "off":
+                raise ValueError(f"{at}: listed, but {missing}")
+        else:
+            cls = layer_type(s.type)  # raises with the list of registered types
+            rank = _CLASSIFIER_RANK
+            if s.mode == "enforce" and c.canary_rate < MIN_CANARY_FOR_ENFORCED_CLASSIFIER:
+                raise ValueError(
+                    f"{at}: a classifier in enforce mode needs a canary of at least {MIN_CANARY_FOR_ENFORCED_CLASSIFIER:.0%} "
+                    "(canary.rate), otherwise the events it skips are never seen again and it cannot be checked. "
+                    "Run it in shadow mode first."
+                )
+            del cls
+        if rank < rank_so_far:
+            raise ValueError(
+                f"{at}: out of order. The order must be dedupe, bypass, rules, then classifiers, then cooldown/quiet_hours/budget"
+            )
+        rank_so_far = rank
+    if "rules" not in seen:
+        raise ValueError('layers: "rules" is required (it applies the default action)')
 
 
 def load_config(path: str | Path) -> Config:

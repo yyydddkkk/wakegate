@@ -108,6 +108,31 @@ class BudgetLayer(_Governor):
         return self.let_through("ok", detail)
 
 
+_BUILTINS = {
+    "dedupe": DedupeLayer, "bypass": BypassLayer, "rules": RulesLayer,
+    "cooldown": CooldownLayer, "quiet_hours": QuietHoursLayer, "budget": BudgetLayer,
+}
+
+
+def build_layers(c: Config) -> list[Layer]:
+    """The pipeline for a config: its `layers:` section if present, otherwise derived from the other keys."""
+    if c.layer_specs is None:
+        return default_layers(c)
+    from .registry import create_layer
+
+    layers: list[Layer] = []
+    for s in c.layer_specs:
+        if s.mode == "off":
+            continue
+        if s.type is None:
+            layer = _BUILTINS[s.name]()
+            layer.mode = s.mode  # type: ignore[assignment]
+        else:
+            layer = create_layer(s.type, s.name, s.params, s.mode)
+        layers.append(layer)
+    return layers
+
+
 def default_layers(c: Config) -> list[Layer]:
     layers: list[Layer] = []
     if c.dedupe:

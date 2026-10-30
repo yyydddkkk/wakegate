@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .builtin_layers import default_layers
+from .builtin_layers import build_layers
 from .config import Config
 from .hashing import canonical_json, omit_paths, sha256
 from .layers import Layer, LayerContext
@@ -40,7 +40,7 @@ class Gate:
         self.config = config
         self.store = store
         self._now = now
-        self.layers = layers if layers is not None else default_layers(config)
+        self.layers = layers if layers is not None else build_layers(config)
 
     def decide(self, event: WakeEvent) -> Decision:
         c = self.config

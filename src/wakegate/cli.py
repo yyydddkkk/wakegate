@@ -142,9 +142,11 @@ def _print_report(r: dict[str, Any]) -> None:
         print(f"  {t['n']:>6}  {t['verdict']}:{t['reason']}")
     if r["funnel"]:
         print("layers (how far events got, and where they ended):")
-        print(f"  {'layer':<12} {'entered':>8} {'skip':>6} {'wake':>6} {'batch':>6} {'passed':>7} {'errors':>6} {'ms':>9}")
+        print(f"  {'layer':<14} {'entered':>8} {'skip':>6} {'wake':>6} {'batch':>6} {'passed':>7} {'errors':>6} {'ms':>9}")
         for f in r["funnel"]:
-            print(f"  {f['layer']:<12} {f['entered']:>8} {f['skip']:>6} {f['wake']:>6} {f['batch']:>6} {f['passed']:>7} {f['errors']:>6} {f['costMs']:>9.1f}")
+            name = f["layer"] + (" (shadow)" if f["mode"] == "shadow" else "")
+            extra = f"   would skip {f['wouldSkip']}, not applied" if f["mode"] == "shadow" else ""
+            print(f"  {name:<14} {f['entered']:>8} {f['skip']:>6} {f['wake']:>6} {f['batch']:>6} {f['passed']:>7} {f['errors']:>6} {f['costMs']:>9.1f}{extra}")
         print("  (skip/wake/batch = ended here; passed = handed on; a wake that no governor stopped ends at rules)")
     if r["untracedDecisions"]:
         print(f"{r['untracedDecisions']} decisions in this window were made before traces existed and are not in the table above.")

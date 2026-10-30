@@ -116,6 +116,23 @@ miss estimate: 1 of 40 sampled suppressed events were wanted = 2.5% (95% CI 0.4%
 
 **What this can and cannot tell you.** `examples/bench_canary.py` checks the estimator against synthetic traffic with known labels and a perfect reviewer: the intervals contain the true rate in about 90-100% of runs, so the estimate is honest. It is also *wide*: with a true miss rate of 1-2% among suppressed events, a 2% canary gives about 8 labels in two weeks and an interval about 36 points wide; 20% gives about 59 labels and about 8 points. Rare misses need hundreds of labels to see. Treat a canary as a tripwire ("a rule just hid something wanted: look at it") rather than a precise rate, and read the per-rule view, not only the overall number. The estimate assumes the reviewer is right; a tired reviewer or an agent labelling its own wakes will be noisier.
 
+## Choosing and ordering layers
+
+By default the layers are derived from the other keys. An optional `layers:` section orders them and sets a mode per layer:
+
+```yaml
+layers:
+  - dedupe
+  - bypass
+  - rules
+  - { name: noop-model, type: some-registered-type, mode: shadow }   # runs and is recorded, never acts
+  - cooldown
+  - quiet_hours
+  - budget
+```
+
+`mode: shadow` runs a layer and records what it would have done, and the cascade carries on as if it had deferred, so you can see a new layer's mistakes on real traffic before it is allowed to act. `mode: off` removes it. A learned layer set to `enforce` requires a canary of at least 2%, because events it skips are otherwise never seen again. Order must be dedupe, bypass, rules, classifiers, then the governors. A `type` must be registered by code you installed; a config file can never import code. No classifier ships yet. See [docs/design/per-layer-modes-and-learning.md](docs/design/per-layer-modes-and-learning.md).
+
 ## Inspecting a decision
 
 Every decision records what each layer saw and returned. `wakegate log --trace` shows the chain per decision:

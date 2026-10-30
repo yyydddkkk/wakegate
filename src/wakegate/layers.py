@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 Outcome = Literal["skip", "wake", "batch", "defer", "error"]
 LayerKind = Literal["detector", "rules", "classifier", "governor"]
 LayerMode = Literal["enforce", "shadow", "canary"]
+#: What a configured layer may be set to. "off" removes it from the pipeline; "canary" is a decision-level mode.
+ConfigurableMode = Literal["off", "shadow", "enforce"]
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,16 @@ class Layer(ABC):
     kind: LayerKind
     #: What to do if the layer raises: "wake" fails open (a broken filter costs money, it does not drop events).
     on_error: Action = "wake"
+    #: "enforce": the outcome is applied. "shadow": it runs and is recorded, and the cascade proceeds
+    #: as if it had deferred. Set from the config; "off" layers are not in the pipeline at all.
+    mode: Literal["enforce", "shadow"] = "enforce"
+
+    @classmethod
+    def create(cls, name: str, params: dict[str, Any]) -> Layer:
+        """Build an instance from its `params`. Override to validate params and set up state."""
+        if params:
+            raise ValueError(f'layer "{name}" takes no params, got: {", ".join(params)}')
+        return cls()
 
     @abstractmethod
     def run(self, ctx: LayerContext) -> LayerResult: ...
